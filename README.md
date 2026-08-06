@@ -85,10 +85,9 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 ### Storage
 | Pool | Driver | Backing | Purpose |
 |------|--------|---------|---------|
-| `default` | ZFS | `zroot/incus` | Local fast storage for VMs/LXC |
 | `ceph` | Ceph RBD | `zroot/ceph-osd0` (Ceph OSD) | Distributed block storage; images clone from base layer |
 
-Both pools are created automatically by Incus preseed on first boot or rebuild.
+Created automatically by Incus preseed on first boot or rebuild. The default profile uses this pool. The legacy ZFS pool has been removed.
 
 ### Networks
 | Name | Type | Subnet | NAT | Purpose |
@@ -114,13 +113,13 @@ Both pools are created automatically by Incus preseed on first boot or rebuild.
 
 ### Quick start
 ```bash
-# Create a VM
+# Create a VM (root disk on Ceph RBD)
 incus launch images:debian/12 my-vm --vm
 
-# Create an LXC container
+# Create an LXC container (root disk on Ceph RBD)
 incus launch images:alpine/3.20 my-ct
 
-# Add custom bridge profiles for overlay segments (when enabled)
+# Add custom bridge profiles for overlay segments
 incus profile create tenant-a
 incus profile device add tenant-a eth0 nic nictype=bridged parent=br-tenant-a name=eth0
 incus launch images:debian/12 vm-a --vm --profile tenant-a
@@ -129,15 +128,9 @@ incus profile create tenant-b
 incus profile device add tenant-b eth0 nic nictype=bridged parent=br-tenant-b name=eth0
 incus launch images:debian/12 vm-b --vm --profile tenant-b
 
-# Create an RBD image (standalone block device)
+# Create a standalone RBD image
 sudo rbd create my-disk --size 10G --pool rbd
 sudo rbd info my-disk --pool rbd
-
-# Launch a container using Ceph RBD for its root disk
-incus launch images:ubuntu/24.04 my-ct --profile ceph
-
-# Launch a VM using Ceph RBD
-incus launch images:debian/12 my-vm --vm --profile ceph
 ```
 
 ---

@@ -14,15 +14,8 @@
         "core.https_address" = ":8443";
       };
 
-      # Storage: local ZFS + distributed Ceph RBD
+      # Storage: Ceph RBD only (ZFS pool removed)
       storage_pools = [
-        {
-          name = "default";
-          driver = "zfs";
-          config = {
-            source = "zroot/incus";
-          };
-        }
         {
           name = "ceph";
           driver = "ceph";
@@ -59,7 +52,7 @@
             };
             root = {
               path = "/";
-              pool = "default";
+              pool = "ceph";
               type = "disk";
             };
           };
@@ -83,20 +76,7 @@
     };
   };
 
-  # Ensure the ZFS backing dataset exists before Incus initializes
-  systemd.services.incus-zfs-prep = {
-    description = "Prepare ZFS dataset for Incus storage";
-    before = [ "incus.service" ];
-    wantedBy = [ "incus.service" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = pkgs.writeShellScript "incus-zfs-prep" ''
-        ${pkgs.zfs}/bin/zfs list zroot/incus >/dev/null 2>&1 || \
-          ${pkgs.zfs}/bin/zfs create -o mountpoint=none zroot/incus
-      '';
-    };
-  };
+  # ZFS dataset prep removed — storage is now Ceph RBD only
 
   # Kernel tweaks for virtualization host
   boot.kernelModules = [ "kvm-intel" "kvm-amd" ];
