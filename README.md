@@ -322,15 +322,18 @@ The cluster is tuned for a single OSD:
 
 ---
 
-## RBD Backups (Incremental to S3 NAS)
+## RBD Backups (Incremental to S3 NAS, Zero Local Staging)
 
-A systemd timer runs daily at 02:00 to back up all RBD images incrementally to an S3-compatible NAS via `rclone`.
+A systemd timer runs daily at 02:00 to back up all RBD images incrementally to an S3-compatible NAS via `rclone`. **No data is written to local disk** — the stream flows directly from Ceph → zstd → S3 upload.
 
 ### How it works
-1. **First run**: `rbd export` → zstd compress → upload full image to S3
-2. **Subsequent runs**: `rbd export-diff --from-snap <last>` → zstd compress → upload delta
-3. **RBD snapshots**: each backup creates a `backup-YYYYMMDD-HHMMSS` snapshot on the image
+1. **First run**: `rbd export -` (stdout) → `zstd -19 -c` → `rclone rcat` uploads full image to S3
+2. **Subsequent runs**: `rbd export-diff --from-snap <last> -` → `zstd -19 -c` → `rclone rcat` uploads delta
+3. **RBD snapshots**: each backup creates a `backup-YYYYMMDD-HHMMSS` snapshot on the image (required for the next incremental diff)
 4. **Retention**: keeps 7 RBD snapshots and 30 days of S3 backups
+
+### Important: S3 single-put limit
+`rclone` is configured with `RCLONE_S3_UPLOAD_CUTOFF=5G` so it streams via a single PUT up to the S3 API limit of 5 GB. Incremental diffs are almost always well under this. If a full export of a very large VM exceeds 5 GB, `rclone` may fall back to multipart buffering with temporary files.
 
 ### Setup
 Create the credentials file (this is **not** in the Nix store):
@@ -359,7 +362,7 @@ rbd-backups/
 └── rbd/
     ├── container_my-vm/
     │   ├── container_my-vm-20260806-020000.zst          (full)
-    │   └── container_my-vm-20260806-020000.diff.zst      (incremental)
+    │   └── container_my-vm-20260807-020000.diff.zst    (incremental)
     └── virtual-machine_another-vm/
         └── ...
 ```
