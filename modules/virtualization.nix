@@ -74,15 +74,6 @@
     };
   };
 
-  # ============================================================================
-  # Podman (OCI containers, Docker-compatible)
-  # ============================================================================
-  virtualisation.podman = {
-    enable = true;
-    dockerCompat = true;
-    defaultNetwork.settings.dns_enabled = true;
-  };
-
   # Kernel tweaks for virtualization host
   boot.kernelModules = [ "kvm-intel" "kvm-amd" ];
   boot.kernel.sysctl = {
@@ -92,8 +83,6 @@
 
   environment.systemPackages = with pkgs; [
     incus
-    podman
-    podman-compose
     qemu_kvm
     # Tools for SPICE/HTML5 console (used by Incus VMs via UI)
     virt-viewer

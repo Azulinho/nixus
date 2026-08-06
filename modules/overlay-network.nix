@@ -5,7 +5,7 @@ let
 in
 {
   options.networking.overlayNetwork = {
-    enable = lib.mkEnableOption "multi-host L2 overlay network for VMs/LXC/Podman (FRR+EVPN only)";
+    enable = lib.mkEnableOption "multi-host L2 overlay network for VMs/LXC (FRR+EVPN only)";
 
     vni = lib.mkOption {
       type = lib.types.int;
@@ -51,7 +51,7 @@ in
     bridgeName = lib.mkOption {
       type = lib.types.str;
       default = "br-evpn";
-      description = "Name of the overlay bridge that VMs/LXC/Podman attach to";
+      description = "Name of the overlay bridge that VMs/LXC attach to";
     };
 
     overlaySubnet = lib.mkOption {
@@ -62,22 +62,6 @@ in
         IP subnet that lives on the overlay (used by distributed firewall rules).
         Leave null if you run multiple subnets on the same VNI and prefer
         manual firewall rules.
-      '';
-    };
-
-    podmanNetworkName = lib.mkOption {
-      type = lib.types.str;
-      default = "evpn";
-      description = "Name of the rootful Podman network attached to the overlay bridge";
-    };
-
-    podmanSubnet = lib.mkOption {
-      type = lib.types.str;
-      default = "10.200.0.0/16";
-      description = ''
-        IP subnet for Podman containers on the overlay.
-        Podman requires a subnet definition even when bridging to an external interface.
-        Should match (or be a part of) `overlaySubnet` if the firewall is used.
       '';
     };
 
@@ -208,34 +192,7 @@ in
     };
 
     # ─────────────────────────────────────────────────────────────
-    # 5. Podman rootful network attached to the overlay bridge
-    # ─────────────────────────────────────────────────────────────
-    virtualisation.podman = {
-      enable = true;
-      dockerCompat = true;
-    };
-
-    systemd.services.podman-overlay-network = {
-      description = "Create Podman network on overlay bridge";
-      after = [ "systemd-networkd.service" "podman.socket" ];
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = pkgs.writeShellScript "podman-overlay-network" ''
-          if ! ${pkgs.podman}/bin/podman network exists ${cfg.podmanNetworkName}; then
-            ${pkgs.podman}/bin/podman network create \
-              -d bridge \
-              --opt bridge=${cfg.bridgeName} \
-              --subnet ${cfg.podmanSubnet} \
-              ${cfg.podmanNetworkName}
-          fi
-        '';
-      };
-    };
-
-    # ─────────────────────────────────────────────────────────────
-    # 6. nftables firewall rules for the overlay (distributed)
+    # 5. nftables firewall rules for the overlay (distributed)
     # ─────────────────────────────────────────────────────────────
     networking.nftables.tables.overlay = lib.mkIf cfg.firewall.enable {
       family = "inet";

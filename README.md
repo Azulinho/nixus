@@ -1,6 +1,6 @@
 # NixOS Proxmox-like Virtualization Cluster
 
-This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, Podman, ZFS, and FRR+EVPN. It is designed to run on a single hypervisor today and scale to a multi-host cluster by cloning the configuration to additional NixOS hosts.
+This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, ZFS, and FRR+EVPN. It is designed to run on a single hypervisor today and scale to a multi-host cluster by cloning the configuration to additional NixOS hosts.
 
 ## Host
 
@@ -18,28 +18,37 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 ```
 ┌─────────────────────────────────────────┐
 │            NixOS Host (172.16.3.4)      │
-│  ┌──────────────┐  ┌─────────────────┐  │
-│  │  Incus       │  │  Podman         │  │
-│  │  ├─ KVM VMs  │  │  ├─ OCI containers│ │
-│  │  └─ LXC      │  │  └─ docker compat │ │
-│  │  Web UI:8443 │  │                 │  │
-│  └──────┬───────┘  └────────┬────────┘  │
-│         │                     │          │
-│    ┌────┴────┐           ┌────┴────┐     │
-│    │incusbr0 │           │br-evpn  │     │
-│    │10.0.100.│           │(disabled│     │
-│    │  1/24   │           │by def)  │     │
-│    └────┬────┘           └────┬────┘     │
-│         │                     │          │
-│  ┌──────┴──────┐         ┌────┴────┐   │
-│  │  ens18      │         │vxlan10  │   │
-│  │ 172.16.3.4  │         │(disabled│   │
-│  └─────────────┘         └─────────┘   │
+│  ┌─────────────────────────────────┐   │
+│  │            Incus                │   │
+│  │  ├─ KVM VMs                     │   │
+│  │  └─ LXC                         │   │
+│  │      Web UI:8443                │   │
+│  └─────────────┬───────────────────┘   │
+│                │                        │
+│    ┌───────────┴──────────┐             │
+│    │      incusbr0       │             │
+│    │    10.0.100.0/24    │             │
+│    │    fd42:100::/64    │             │
+│    └───────────┬──────────┘             │
+│                │                        │
+│         ┌──────┴──────┐                 │
+│         │   ens18     │                 │
+│         │172.16.3.4/24│                │
+│         └─────────────┘                 │
+│                                          │
+│    ┌──────────────────────────────┐    │
+│    │      br-evpn (disabled)      │    │
+│    │      Overlay fabric          │    │
+│    └──────────────┬───────────────┘    │
+│                   │                      │
+│            ┌──────┴──────┐             │
+│            │  vxlan10   │             │
+│            │(FRR+EVPN)  │             │
+│            └─────────────┘             │
 └─────────────────────────────────────────┘
 ```
 
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
-- **Podman** provides OCI containers with Docker compatibility.
 - **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
 - **FRR + EVPN** provides a multi-host L2 overlay fabric (currently disabled; activate when you add a second hypervisor).
 - **nftables** provides IPv4/IPv6 firewalling, both for the host and the overlay network.
@@ -52,11 +61,11 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 |------|---------|
 | [`configuration.nix`](configuration.nix) | Top-level configuration; imports all modules and hardware scan |
 | [`hardware-configuration.nix`](hardware-configuration.nix) | Auto-generated disk/ZFS layout (do not edit) |
-| [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), Podman, kernel sysctl for forwarding |
+| [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), kernel sysctl for forwarding |
 | [`modules/networking.nix`](modules/networking.nix) | systemd-networkd, VLAN/bond support, nftables firewall |
 | [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
 | [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, kernel VXLAN, `br-evpn` |
-| [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `podman`, `wheel` groups |
+| [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `wheel` groups |
 
 ---
 
@@ -99,22 +108,6 @@ incus launch images:alpine/3.20 my-ct
 incus profile create overlay
 incus profile device add overlay eth0 nic nictype=bridged parent=br-evpn name=eth0
 incus launch images:debian/12 overlay-vm --vm --profile overlay
-```
-
----
-
-## Podman
-
-- **Rootful daemon** with Docker socket compatibility
-- Default network has DNS enabled
-- An overlay network `evpn` is auto-created on `br-evpn` when the overlay module is enabled
-
-```bash
-# Run a container on the default network
-podman run -it alpine
-
-# Run a container on the overlay (when enabled)
-podman run --network=evpn --ip=10.200.0.50 -it alpine
 ```
 
 ---
@@ -172,7 +165,7 @@ The overlay network is **disabled by default** on a single host.
 ### What it does
 When enabled, it creates:
 - `vxlan10` — a kernel VXLAN tunnel interface
-- `br-evpn` — a Linux bridge that VMs, LXC, and Podman attach to
+- `br-evpn` — a Linux bridge that VMs and LXC attach to
 - **FRR bgpd** — exchanges EVPN routes so every hypervisor learns which remote VTEP owns which MAC address
 
 This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch.
@@ -235,7 +228,7 @@ NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require ha
 sudo nixos-rebuild switch
 
 # Check all services
-systemctl is-active incus podman.socket nftables systemd-networkd
+systemctl is-active incus nftables systemd-networkd
 
 # List Incus resources
 incus storage list
@@ -245,10 +238,6 @@ incus profile list
 # ZFS status
 zpool status
 zfs list -t snapshot
-
-# Podman status
-podman info
-podman network ls
 
 # BGP status (when overlay enabled)
 sudo vtysh -c "show bgp l2vpn evpn summary"

@@ -10,7 +10,6 @@
     extraGroups = [
       "wheel"        # sudo access
       "incus-admin"  # full Incus administration
-      "podman"       # rootless podman
     ];
     # Set a password after first login with: sudo passwd admin
     # Or define an initial hashed password here:
