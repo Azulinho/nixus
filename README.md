@@ -350,6 +350,17 @@ sops secrets/secrets.yaml
 > ```
 Replace the placeholder values under `rbdBackupS3Env` with your real NAS credentials, then save and exit.
 
+The file should look like this (sops will encrypt it on save):
+
+```yaml
+rbdBackupS3Env: |
+  RCLONE_CONFIG_S3NAS_TYPE=s3
+  RCLONE_CONFIG_S3NAS_PROVIDER=Minio
+  RCLONE_CONFIG_S3NAS_ENDPOINT=http://nas-ip:9000
+  RCLONE_CONFIG_S3NAS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+  RCLONE_CONFIG_S3NAS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+```
+
 **2. Verify decryption works:**
 ```bash
 sudo systemctl restart sops-nix
