@@ -72,6 +72,23 @@
             };
           };
         }
+        {
+          name = "router";
+          description = "Lightweight VM profile for tenant virtual routers (OpenWrt/VyOS/OPNsense)";
+          config = {
+            "limits.cpu" = "2";
+            "limits.memory" = "256MiB";
+            "security.secureboot" = "false";
+          };
+          devices = {
+            root = {
+              path = "/";
+              pool = "ceph";
+              type = "disk";
+              size = "2GiB";
+            };
+          };
+        }
       ];
     };
   };

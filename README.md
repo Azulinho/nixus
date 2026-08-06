@@ -327,8 +327,11 @@ incus project set $TENANT limits.instances=20 limits.memory=64GiB
 
 **2. Admin creates the router VM with overlay uplink(s)**
 
+A pre-defined `router` profile sets 2 vCPUs, 256 MiB RAM, Secure Boot disabled, and a 2 GB Ceph root disk — perfect for OpenWrt.
+
 ```bash
-incus init images:openwrt/23.05 $TENANT-router --project $TENANT --vm
+incus init images:openwrt/23.05 $TENANT-router --project $TENANT \
+  --profile router --vm
 
 # Primary uplink to br-tenant-a
 incus config device add $TENANT-router eth0 nic \
@@ -380,11 +383,14 @@ If the tenant used **macvtap** or **routed** NICs instead of bridges, the router
 
 ### Variation: Linux router instead of OpenWrt
 
-For tenants who prefer plain Linux:
+For tenants who prefer plain Linux, use the same `router` profile but bump memory:
 
 ```bash
-incus init images:ubuntu/24.04 $TENANT-router --project $TENANT --vm
-# Same NIC attachments as above
+incus init images:ubuntu/24.04 $TENANT-router --project $TENANT \
+  --profile router --vm
+incus config set $TENANT-router limits.memory=1GiB --project $TENANT
+
+# Same NIC attachments as OpenWrt example above
 # Inside the VM:
 #   apt install frr nftables kea dhcp4-server
 #   Configure as a standard Linux router with your choice of tooling
