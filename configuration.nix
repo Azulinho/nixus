@@ -15,6 +15,7 @@
       ./modules/backup.nix
       ./modules/users.nix
       ./modules/overlay-network.nix
+      ./modules/ceph.nix
     ];
 
   # Use the systemd-boot EFI boot loader.

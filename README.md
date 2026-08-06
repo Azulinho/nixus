@@ -48,12 +48,19 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 │            │  vxlan20   │             │
 │            │(FRR+EVPN)  │             │
 │            └─────────────┘             │
+│                                          │
+│    ┌──────────────────────────────┐    │
+│    │   Ceph RBD (single-node)     │    │
+│    │  ├─ MON + MGR + OSD         │    │
+│    │  └─ zroot/ceph-osd0 (20G)   │    │
+│    └──────────────────────────────┘    │
 └─────────────────────────────────────────┘
 ```
 
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
 - **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
 - **FRR + EVPN** provides a multi-host L2 overlay fabric with two tenant segments already active. BGP peers are empty until a second hypervisor joins.
+- **Ceph RBD** provides distributed block storage via a single-node Ceph cluster (MON, MGR, OSD on a 20G ZFS zvol). RBD images can be used for VM disks.
 - **nftables** provides IPv4/IPv6 firewalling, both for the host and the overlay network.
 
 ---
@@ -69,6 +76,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
 | [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, multi-VNI, kernel VXLAN |
 | [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `wheel` groups |
+| [`modules/ceph.nix`](modules/ceph.nix) | Single-node Ceph cluster (MON+MGR+OSD) with RBD pool on ZFS zvol |
 
 ---
 
@@ -116,6 +124,10 @@ incus launch images:debian/12 vm-a --vm --profile tenant-a
 incus profile create tenant-b
 incus profile device add tenant-b eth0 nic nictype=bridged parent=br-tenant-b name=eth0
 incus launch images:debian/12 vm-b --vm --profile tenant-b
+
+# Create an RBD image (block storage)
+sudo rbd create my-disk --size 10G --pool rbd
+sudo rbd info my-disk --pool rbd
 ```
 
 ---
@@ -242,6 +254,54 @@ NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require ha
 
 ---
 
+## Ceph RBD
+
+A single-node Ceph cluster is running with a 20G OSD backed by the ZFS zvol `zroot/ceph-osd0`.
+
+| Daemon | Status | Purpose |
+|--------|--------|---------|
+| `ceph-mon-a` | Active | Cluster monitor and quorum |
+| `ceph-mgr-a` | Active | Manager (dashboard, metrics) |
+| `ceph-osd-0` | Active | Object storage daemon on ZFS zvol |
+
+### Pool
+| Name | Application | PGs | Purpose |
+|------|-------------|-----|---------|
+| `rbd` | `rbd` | 32 | RADOS Block Device images |
+| `.mgr` | `mgr` | 1 | Internal manager pool |
+
+### RBD quick commands
+```bash
+# Cluster status
+sudo ceph -s
+
+# List pools
+sudo ceph osd pool ls
+
+# Create an image
+sudo rbd create my-disk --size 10G --pool rbd
+
+# List images
+sudo rbd ls --pool rbd
+
+# Image details
+sudo rbd info my-disk --pool rbd
+
+# Map to local block device
+sudo rbd map my-disk --pool rbd
+```
+
+### Single-node tuning
+The cluster is tuned for a single OSD:
+- `osd_pool_default_size = 1` (no replication)
+- `osd_pool_default_min_size = 1`
+- Crush rule modified to use `type osd` instead of `type host`
+- `mon_warn_on_pool_no_redundancy = false`
+
+> **Note:** This is a single-node test cluster. Do not store critical data without adding more OSDs and enabling replication.
+
+---
+
 ## Quick Commands
 
 ```bash
@@ -249,7 +309,7 @@ NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require ha
 sudo nixos-rebuild switch
 
 # Check all services
-systemctl is-active incus nftables systemd-networkd
+systemctl is-active incus nftables systemd-networkd frr
 
 # List Incus resources
 incus storage list
@@ -259,6 +319,9 @@ incus profile list
 # ZFS status
 zpool status
 zfs list -t snapshot
+
+# Ceph status
+sudo ceph -s
 
 # BGP status (when overlay enabled)
 sudo vtysh -c "show bgp l2vpn evpn summary"
@@ -285,6 +348,7 @@ Items tracked in `/root/desired.txt` that are not yet implemented:
 - Distributed firewall (implemented as identical nftables configs)
 - Single-file restore from remote ZFS snapshots (documented workflow)
 - ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
+- Ceph multi-node expansion (currently single-node only)
 
 ---
 
