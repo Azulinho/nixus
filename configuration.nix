@@ -27,6 +27,13 @@
   boot.zfs.requestEncryptionCredentials = true;
   networking.hostId = "01234567";
 
+  # Enable zswap: compressed RAM cache for swap pages
+  boot.kernelParams = [
+    "zswap.enabled=1"
+    "zswap.compressor=zstd"
+    "zswap.zpool=zsmalloc"
+  ];
+
 
   # networking.hostName = "nixos"; # Define your hostname.
 
