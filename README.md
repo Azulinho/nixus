@@ -59,8 +59,8 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
 - **OVN** provides the multi-host SDN fabric: project-scoped logical networks with DHCP/NAT, replacing the old FRR+EVPN overlay.
-- **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
-- **Ceph RBD** provides distributed block storage via a single-node Ceph cluster (MON, MGR, OSD on a 20G ZFS zvol). RBD images can be used for VM disks.
+- **ZFS** is the encrypted host filesystem (`aes-256-gcm`). It holds the OS datasets, the swap zvol (`zroot/swap`), and the `zroot/ceph-osd0` zvol that backs the Ceph OSD. It does **not** store VM/LXC data — Incus uses Ceph RBD exclusively for that. ZFS auto-snapshots protect host state only.
+- **Ceph RBD** provides distributed block storage via a single-node Ceph cluster (MON, MGR, OSD on a 20G ZFS zvol). **All Incus instances (VMs and LXC) store their root disks here.**
 - **nftables** provides IPv4/IPv6 firewalling for the host.
 
 ---
@@ -151,7 +151,13 @@ sudo rbd info my-disk --pool rbd
 
 ## Backup & Snapshots
 
+> **Two separate backup domains** — don't confuse them:
+> - **Host state** (OS datasets, Ceph OSD backing store): ZFS auto-snapshots + syncoid below.
+> - **VM/LXC data** (all on Ceph RBD): incremental RBD backups to S3 — see [RBD Backups](#rbd-backups-incremental-to-s3-nas-zero-local-staging).
+
 ### ZFS Auto-Snapshots
+Snapshot host datasets (`zroot/root`, `zroot/nix`, `zroot/ceph-osd0`) on the intervals below. These protect the NixOS system and the Ceph OSD backing store — **not** VM/container disks (those live in RBD and are handled by the RBD backup job).
+
 | Interval | Retention | Timer |
 |----------|-----------|-------|
 | 15 minutes | 4 copies | `zfs-snapshot-frequent.timer` |
@@ -161,7 +167,7 @@ sudo rbd info my-disk --pool rbd
 | Monthly | 12 copies | `zfs-snapshot-monthly.timer` |
 
 ### Remote Replication (syncoid)
-Configured but **disabled by default** in `modules/backup.nix`.
+Configured but **disabled by default** in `modules/backup.nix`. Replicates the same host datasets (above) to a remote ZFS host — again, host state, not VM disks.
 
 To enable:
 1. Set up SSH key-based access to a remote ZFS host
@@ -178,8 +184,11 @@ To enable:
 3. `nixos-rebuild switch`
 
 ### Single-file restore
+Applies to host files from the ZFS snapshots above:
 - Mount a remote snapshot locally: `zfs send ... | zfs recv zroot/restore`
 - Access files under the snapshot path: `/zroot/restore/.zfs/snapshot/...`
+
+For **VM/container files**, restore the RBD image from S3 (see the [RBD restore workflow](#rbd-backups-incremental-to-s3-nas-zero-local-staging)) and mount/`qemu-nbd` it locally.
 
 ---
 
@@ -378,7 +387,7 @@ incus exec $TENANT-router --project $TENANT -- ash
 
 Inside the VM (OpenWrt/OPNsense/Linux):
 
-- Assign `eth0` an IP on the overlay segment (e.g. `10.10.0.254/16`) — this becomes the **default gateway** for the tenant's VMs on that segment.
+- Assign `eth0` an IP on the tenant's OVN network (e.g. `10.0.0.254/24`) — this becomes the **default gateway** for the tenant's VMs on that network.
 - Create **VLAN interfaces** on `eth0` if you want micro-segmentation (`eth0.100`, `eth0.200`).
 - Enable `net.ipv4.ip_forward=1`.
 - Set up **firewall zones** (WAN = eth0, LAN = internal bridges).
@@ -604,9 +613,6 @@ zfs list -t snapshot
 # Ceph status
 sudo ceph -s
 
-# Ceph status
-sudo ceph -s
-
 # OVN status
 sudo systemctl status ovn-northd ovn-controller
 ```
@@ -628,7 +634,7 @@ Items tracked in `/root/desired.txt` that are not yet implemented:
 - QinQ (double-tagged VLANs)
 - OVN multi-central-node RAFT cluster (module supports it; needs 3 hosts to activate)
 - Distributed firewall via OVN ACLs (native, per-project)
-- Single-file restore from remote ZFS snapshots (documented workflow)
+- Automated single-file restore from remote ZFS snapshots
 - ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
 - Ceph multi-node expansion (currently single-node only)
 
