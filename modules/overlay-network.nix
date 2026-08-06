@@ -196,35 +196,28 @@ in
     # 5. FRR + BGP/EVPN (advertise-all-vni discovers every VXLAN)
     # ─────────────────────────────────────────────────────────────
     services.frr = {
-      zebra = {
-        enable = true;
-        config = ''
-          ip forwarding
-          ipv6 forwarding
-        '';
-      };
-      bgp = {
-        enable = true;
-        config = let
-          allNeighbors = lib.unique (cfg.frrPeers ++ cfg.frrRouteReflectorClients);
-          neighborStanza = lib.concatMapStringsSep "\n  " (peer:
-            "neighbor ${peer} remote-as ${toString cfg.frrAsn}"
-          ) allNeighbors;
-          rrClientStanza = lib.concatMapStringsSep "\n  " (client:
-            "neighbor ${client} route-reflector-client"
-          ) cfg.frrRouteReflectorClients;
-        in ''
-          router bgp ${toString cfg.frrAsn}
-           bgp router-id ${cfg.localAddress}
-           no bgp default ipv4-unicast
-           ${neighborStanza}
-           ${rrClientStanza}
-           address-family l2vpn evpn
-            ${lib.concatMapStringsSep "\n    " (peer: "neighbor ${peer} activate") allNeighbors}
-            advertise-all-vni
-           exit-address-family
-        '';
-      };
+      config = let
+        allNeighbors = lib.unique (cfg.frrPeers ++ cfg.frrRouteReflectorClients);
+        neighborStanza = lib.concatMapStringsSep "\n  " (peer:
+          "neighbor ${peer} remote-as ${toString cfg.frrAsn}"
+        ) allNeighbors;
+        rrClientStanza = lib.concatMapStringsSep "\n  " (client:
+          "neighbor ${client} route-reflector-client"
+        ) cfg.frrRouteReflectorClients;
+      in ''
+        ip forwarding
+        ipv6 forwarding
+        router bgp ${toString cfg.frrAsn}
+         bgp router-id ${cfg.localAddress}
+         no bgp default ipv4-unicast
+         ${neighborStanza}
+         ${rrClientStanza}
+         address-family l2vpn evpn
+          ${lib.concatMapStringsSep "\n    " (peer: "neighbor ${peer} activate") allNeighbors}
+          advertise-all-vni
+         exit-address-family
+      '';
+      bgpd.enable = true;
     };
 
     # ─────────────────────────────────────────────────────────────

@@ -107,6 +107,20 @@
   # Enable the OpenSSH daemon.
   services.openssh.enable = true;
 
+  # Multi-host overlay fabric (enabled now for local tenant isolation;
+  # add frrPeers when second hypervisor joins)
+  networking.overlayNetwork = {
+    enable = true;
+    localAddress = "172.16.3.4";
+    frrPeers = [];
+    frrAsn = 64512;
+    vnis = [
+      { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
+      { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
+    ];
+    firewall.enable = true;
+  };
+
   # Open ports in the firewall.
   # networking.firewall.allowedTCPPorts = [ ... ];
   # networking.firewall.allowedUDPPorts = [ ... ];
