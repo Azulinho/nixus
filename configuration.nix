@@ -8,6 +8,13 @@
   imports =
     [ # Include the results of the hardware scan.
       ./hardware-configuration.nix
+
+      # Proxmox-like feature modules
+      ./modules/virtualization.nix
+      ./modules/networking.nix
+      ./modules/backup.nix
+      ./modules/users.nix
+      ./modules/overlay-network.nix
     ];
 
   # Use the systemd-boot EFI boot loader.
@@ -84,6 +91,7 @@
      pi-coding-agent
      opencode
      git
+     tmux
   ];
 
   # Some programs need SUID wrappers, can be configured further or are
