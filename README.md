@@ -343,6 +343,11 @@ Secrets are managed with [sops-nix](https://github.com/Mic92/sops-nix). The encr
 cd /etc/nixos
 sops secrets/secrets.yaml
 ```
+> If `sops` fails to find the age key, either export `SOPS_AGE_KEY_FILE=/var/lib/sops/age.key` or symlink it:
+> ```bash
+> mkdir -p ~/.config/sops/age
+> ln -s /var/lib/sops/age.key ~/.config/sops/age/keys.txt
+> ```
 Replace the placeholder values under `rbdBackupS3Env` with your real NAS credentials, then save and exit.
 
 **2. Verify decryption works:**
