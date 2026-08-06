@@ -37,7 +37,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 │         └─────────────┘                 │
 │                                          │
 │    ┌──────────────────────────────┐    │
-│    │   Overlay fabric (disabled)  │    │
+│    │   Overlay fabric (enabled)   │    │
 │    │  ├─ br-tenant-a  (VNI 10)    │    │
 │    │  ├─ br-tenant-b  (VNI 20)    │    │
 │    │  └─ ... more VNIs            │    │
@@ -53,7 +53,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
 - **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
-- **FRR + EVPN** provides a multi-host L2 overlay fabric (currently disabled; activate when you add a second hypervisor).
+- **FRR + EVPN** provides a multi-host L2 overlay fabric with two tenant segments already active. BGP peers are empty until a second hypervisor joins.
 - **nftables** provides IPv4/IPv6 firewalling, both for the host and the overlay network.
 
 ---
@@ -82,7 +82,8 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | Name | Type | Subnet | NAT | Purpose |
 |------|------|--------|-----|---------|
 | `incusbr0` | Bridge | `10.0.100.0/24` + `fd42:100::/64` | Yes | Default Incus network (VMs/LXC get IPs here) |
-| `br-tenant-a` … | Bridge | Overlay L2 (disabled) | N/A | Stretched tenant segments across hypervisors (see Overlay) |
+| `br-tenant-a` | Bridge | Overlay L2 (VNI 10) | N/A | Tenant A segment, 10.10.0.0/16 |
+| `br-tenant-b` | Bridge | Overlay L2 (VNI 20) | N/A | Tenant B segment, 10.20.0.0/16 |
 
 ### Web UI
 - URL: `https://<host-ip>:8443`
@@ -167,7 +168,7 @@ To enable:
 
 ## Multi-Host Overlay (FRR + BGP/EVPN)
 
-The overlay network is **disabled by default** on a single host.
+The overlay network is **enabled** on this host with two tenant segments for local isolation. BGP has no peers yet — cross-host stretching activates automatically when you add a second hypervisor to `frrPeers`.
 
 ### What it does
 When enabled, it creates one or more isolated overlay segments. Each segment gets:
@@ -177,14 +178,14 @@ When enabled, it creates one or more isolated overlay segments. Each segment get
 
 This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch. Segments are fully isolated from each other at L2 — they are separate VNIs, not 802.1q VLANs on a shared wire.
 
-### Enabling on this host
-Add to `configuration.nix`:
+### Current configuration
+In `configuration.nix`:
 
 ```nix
 networking.overlayNetwork = {
   enable = true;
   localAddress = "172.16.3.4";
-  frrPeers = [ "172.16.3.5" ];  # your second hypervisor
+  frrPeers = [];  # empty until second hypervisor joins
   frrAsn = 64512;
   vnis = [
     { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
@@ -194,7 +195,7 @@ networking.overlayNetwork = {
 };
 ```
 
-Then `nixos-rebuild switch`.
+To add a second hypervisor, just put its underlay IP in `frrPeers` on both hosts and rebuild.
 
 You can add more segments later by appending to `vnis` and rebuilding. Existing VNIs keep working because FRR advertises all of them.
 
@@ -280,7 +281,7 @@ sudo vtysh -c "show bgp l2vpn evpn"
 Items tracked in `/root/desired.txt` that are not yet implemented:
 - QinQ (double-tagged VLANs)
 - VXLAN tunneling without EVPN (not needed; we use FRR+EVPN)
-- BGP-based EVPN (implemented; needs second host to activate)
+- BGP-based EVPN (implemented; active locally, needs `frrPeers` for cross-host)
 - Distributed firewall (implemented as identical nftables configs)
 - Single-file restore from remote ZFS snapshots (documented workflow)
 - ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
