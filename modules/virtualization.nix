@@ -13,7 +13,7 @@
       config = {
         "core.https_address" = ":8443";
         # OVN SDN integration (project-scoped networks)
-        "network.ovn.northbound_connection" = "unix:/run/ovn/ovnnb_db.sock";
+        "network.ovn.northbound_connection" = "tcp:172.16.3.4:6641";
         "network.ovn.integration_bridge" = "br-int";
       };
 

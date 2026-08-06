@@ -1,6 +1,6 @@
 # NixOS Proxmox-like Virtualization Cluster
 
-This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, ZFS, and FRR+EVPN. It is designed to run on a single hypervisor today and scale to a multi-host cluster by cloning the configuration to additional NixOS hosts.
+This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, OVN, ZFS, and Ceph RBD. It is designed to run on a single hypervisor today and scale to a multi-host cluster (3 OVN central + N compute nodes) by cloning the configuration to additional NixOS hosts.
 
 ## Host
 
@@ -37,16 +37,16 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 │         └─────────────┘                 │
 │                                          │
 │    ┌──────────────────────────────┐    │
-│    │   Overlay fabric (enabled)   │    │
-│    │  ├─ br-tenant-a  (VNI 10)    │    │
-│    │  ├─ br-tenant-b  (VNI 20)    │    │
-│    │  └─ ... more VNIs            │    │
+│    │   OVN SDN (enabled)          │    │
+│    │  ├─ NB/SB DBs (central)      │    │
+│    │  ├─ ovn-northd               │    │
+│    │  └─ ovn-controller (chassis) │    │
 │    └──────────────┬───────────────┘    │
 │                   │                      │
 │            ┌──────┴──────┐             │
-│            │  vxlan10   │             │
-│            │  vxlan20   │             │
-│            │(FRR+EVPN)  │             │
+│            │   br-int    │             │
+│            │ (OVS integ) │             │
+│            │ geneve      │             │
 │            └─────────────┘             │
 │                                          │
 │    ┌──────────────────────────────┐    │
@@ -58,10 +58,10 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 ```
 
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
+- **OVN** provides the multi-host SDN fabric: project-scoped logical networks with DHCP/NAT, replacing the old FRR+EVPN overlay.
 - **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
-- **FRR + EVPN** provides a multi-host L2 overlay fabric with two tenant segments already active. BGP peers are empty until a second hypervisor joins.
 - **Ceph RBD** provides distributed block storage via a single-node Ceph cluster (MON, MGR, OSD on a 20G ZFS zvol). RBD images can be used for VM disks.
-- **nftables** provides IPv4/IPv6 firewalling, both for the host and the overlay network.
+- **nftables** provides IPv4/IPv6 firewalling for the host.
 
 ---
 
@@ -74,7 +74,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), kernel sysctl for forwarding |
 | [`modules/networking.nix`](modules/networking.nix) | systemd-networkd, VLAN/bond support, nftables firewall |
 | [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
-| [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, multi-VNI, kernel VXLAN |
+| [`modules/ovn.nix`](modules/ovn.nix) | OVN SDN: NB/SB databases, ovn-northd, ovn-controller (central/compute roles) |
 | [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `wheel` groups |
 | [`modules/ceph.nix`](modules/ceph.nix) | Single-node Ceph cluster (MON+MGR+OSD) with RBD pool on ZFS zvol |
 
@@ -92,9 +92,16 @@ Created automatically by Incus preseed on first boot or rebuild. The default pro
 ### Networks
 | Name | Type | Subnet | NAT | Purpose |
 |------|------|--------|-----|---------|
-| `incusbr0` | Bridge | `10.0.100.0/24` + `fd42:100::/64` | Yes | Default Incus network (VMs/LXC get IPs here) |
-| `br-tenant-a` | Bridge | Overlay L2 (VNI 10) | N/A | Tenant A segment, 10.10.0.0/16 |
-| `br-tenant-b` | Bridge | Overlay L2 (VNI 20) | N/A | Tenant B segment, 10.20.0.0/16 |
+| `incusbr0` | Bridge | `10.0.100.0/24` + `fd42:100::/64` | Yes | Default Incus network (VMs/LXC get IPs here), OVN uplink |
+| `<tenant>-net` | OVN | auto (per project) | Yes | Project-scoped logical networks via OVN |
+| `br-int` | OVS | N/A | N/A | OVN integration bridge (internal, managed by OVS) |
+
+Project-scoped OVN networks are created on demand:
+
+```bash
+incus project create tenant-a
+incus network create tenant-a-net --type=ovn --project tenant-a
+```
 
 ### Web UI
 - URL: `https://<host-ip>:8443`
@@ -119,14 +126,11 @@ incus launch images:debian/12 my-vm --vm
 # Create an LXC container (root disk on Ceph RBD)
 incus launch images:alpine/3.20 my-ct
 
-# Add custom bridge profiles for overlay segments
-incus profile create tenant-a
-incus profile device add tenant-a eth0 nic nictype=bridged parent=br-tenant-a name=eth0
-incus launch images:debian/12 vm-a --vm --profile tenant-a
-
-incus profile create tenant-b
-incus profile device add tenant-b eth0 nic nictype=bridged parent=br-tenant-b name=eth0
-incus launch images:debian/12 vm-b --vm --profile tenant-b
+# Create a project with an isolated OVN network
+incus project create tenant-a
+incus project set tenant-a features.networks=true
+incus network create tenant-a-net --type=ovn --project tenant-a
+incus launch images:debian/12 vm-a --project tenant-a --network tenant-a-net
 
 # Create a standalone RBD image
 sudo rbd create my-disk --size 10G --pool rbd
@@ -141,9 +145,7 @@ sudo rbd info my-disk --pool rbd
 - **Host rules:** defined in `modules/networking.nix`
   - SSH (22) and Incus UI (8443) are open
   - Forwarding is allowed for bridges
-- **Overlay rules:** defined in `modules/overlay-network.nix`
-  - Identical on every hypervisor → **distributed firewall**
-  - Custom rules can be added via `networking.overlayNetwork.firewall.customRules`
+- **OVN ACLs:** tenant network access control is handled natively by OVN logical ACLs rather than host nftables rules — keeping the host firewall minimal.
 
 ---
 
@@ -181,104 +183,61 @@ To enable:
 
 ---
 
-## Multi-Host Overlay (FRR + BGP/EVPN)
+## Multi-Host Networking (OVN)
 
-The overlay network is **enabled** on this host with two tenant segments for local isolation. BGP has no peers yet — cross-host stretching activates automatically when you add a second hypervisor to `frrPeers`.
+OVN (Open Virtual Network) is the SDN layer for this fabric. It replaces the earlier FRR + BGP/EVPN overlay — which has been **removed** — because OVN provides everything EVPN did plus project-scoped logical networks, DHCP/NAT, and tenant self-service.
 
-### What it does
-When enabled, it creates one or more isolated overlay segments. Each segment gets:
-- `vxlan<VNI>` — a kernel VXLAN tunnel interface (e.g. `vxlan10`, `vxlan20`)
-- `br-<name>` — a Linux bridge that VMs and LXC attach to for that segment
-- **FRR bgpd** — exchanges EVPN routes for *all* VNIs so every hypervisor learns which remote VTEP owns which MAC address in each segment
+### Why OVN over FRR+EVPN
 
-This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch. Segments are fully isolated from each other at L2 — they are separate VNIs, not 802.1q VLANs on a shared wire.
-
-### Current configuration
-In `configuration.nix`:
-
-```nix
-networking.overlayNetwork = {
-  enable = true;
-  localAddress = "172.16.3.4";
-  frrPeers = [];  # empty until second hypervisor joins
-  frrAsn = 64512;
-  vnis = [
-    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
-    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
-  ];
-  firewall.enable = true;
-};
-```
-
-To add a second hypervisor, just put its underlay IP in `frrPeers` on both hosts and rebuild.
-
-You can add more segments later by appending to `vnis` and rebuilding. Existing VNIs keep working because FRR advertises all of them.
-
-### Scaling to many hosts
-
-| Cluster Size | Topology | Config |
-|--------------|----------|--------|
-| 2–10 | Full mesh | Each host lists all others in `frrPeers` |
-| 10–20 | Full mesh (tedious) or early RRs | Same, or promote 2 hosts to RRs |
-| 20+ | **Route Reflectors** | 2–3 RRs carry full peer list; regular hosts only peer with RRs |
-
-#### Route Reflector example
-```nix
-# On the RR host (e.g. 172.16.3.10)
-networking.overlayNetwork = {
-  enable = true;
-  localAddress = "172.16.3.10";
-  frrPeers = [ "172.16.3.11" "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
-  frrRouteReflectorClients = [ "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
-  frrAsn = 64512;
-  vnis = [
-    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
-    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
-  ];
-};
-
-# On a regular hypervisor (e.g. 172.16.3.5)
-networking.overlayNetwork = {
-  enable = true;
-  localAddress = "172.16.3.5";
-  frrPeers = [ "172.16.3.10" "172.16.3.11" ];  # only the RRs
-  frrAsn = 64512;
-  vnis = [
-    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
-    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
-  ];
-};
-```
-
-Adding Host 21 only requires editing **Host 21's** config and adding it to the RR client lists. No rebuilds on existing hosts.
-
-### OVN (enabled — replaces the bridge workaround)
-
-**Update:** OVN is now fully working on this host. See the [OVN SDN](#ovn-sdn) section below. The hand-written `ovn-northd`/`ovn-controller` systemd services live in `modules/ovn.nix`. OVN enables **project-scoped networks** — something the plain-bridge tenant model could not do.
-
----
-
-## OVN SDN
-
-OVN (Open Virtual Network) provides software-defined networking on top of Open vSwitch. It replaces the manual bridge-per-segment model with **logical networks that can be created per-project by tenants**.
+| Capability | FRR+EVPN (removed) | OVN |
+|-----------|-------------------|-----|
+| Cross-host L2 | VXLAN + BGP EVPN | Geneve tunnels (on-demand) |
+| Tenant isolation | VNI per segment | Logical switch per project |
+| DHCP / NAT | Not built in | Built in |
+| Tenant self-service | Admin provisions bridges | `incus network create --type=ovn` |
+| Control plane | BGP (peer management) | OVN NB/SB databases (RAFT) |
 
 ### Components
 
-| Service | Purpose | Provided by |
-|---------|---------|-------------|
-| `ovsdb` + `ovs-vswitchd` | Open vSwitch base | NixOS `virtualisation.vswitch.enable` |
-| `ovn-nb-db` | OVN Northbound DB (logical topology) | `modules/ovn.nix` |
-| `ovn-sb-db` | OVN Southbound DB (runtime state) | `modules/ovn.nix` |
-| `ovn-northd` | Syncs NB → SB | `modules/ovn.nix` |
-| `ovn-controller` | Local agent on each hypervisor | `modules/ovn.nix` |
+| Service | Purpose | Runs on |
+|---------|---------|---------|
+| `ovsdb` + `ovs-vswitchd` | Open vSwitch base | Every host |
+| `ovn-nb-db` | OVN Northbound DB (logical topology) | Central (3 nodes) |
+| `ovn-sb-db` | OVN Southbound DB (runtime state) | Central (3 nodes) |
+| `ovn-northd` | Syncs NB → SB | Central (3 nodes) |
+| `ovn-controller` | Local agent, registers chassis | Every host |
 
-### How it was wired up
+### Roles
 
-1. `virtualisation.vswitch.enable = true` starts OVS.
-2. `ovn-nb-db`/`ovn-sb-db` create databases with `ovsdb-tool create` using the OVN schemas, then serve them on unix sockets `/run/ovn/ovnnb_db.sock` and `/run/ovn/ovnsb_db.sock`.
-3. `ovn-northd` connects NB ↔ SB.
-4. `ovn-controller` connects to OVS and the SB DB, registers itself as a chassis (system-id = machine-id), and applies logical flows.
-5. Incus config: `network.ovn.northbound_connection` and `network.ovn.integration_bridge` (set via preseed).
+`modules/ovn.nix` defines two roles:
+
+- **`central`** — runs the NB/SB databases and `ovn-northd`. Use on the **first 3 hosts**. With 3 central nodes the databases form a RAFT cluster (quorum survives 1 failure). With 1 node the DBs run standalone (no HA).
+- **`compute`** — runs only OVS + `ovn-controller`. Use on all other hosts.
+
+### Current configuration (single host)
+
+```nix
+networking.ovn = {
+  enable = true;
+  role = "central";
+  centralNodes = [ "172.16.3.4" ];   # 1 node = standalone DBs
+  nodeIndex = 0;
+  localAddress = "172.16.3.4";       # underlay IP (geneve encap)
+};
+```
+
+### Scaling to 3 central + 27 compute hosts
+
+| Host | Config |
+|------|--------|
+| Central 1 (172.16.3.1) | `role = "central"`, `centralNodes = ["172.16.3.1" "172.16.3.2" "172.16.3.3"]`, `nodeIndex = 0` |
+| Central 2 (172.16.3.2) | same list, `nodeIndex = 1` |
+| Central 3 (172.16.3.3) | same list, `nodeIndex = 2` |
+| Compute 4..30 | `role = "compute"`, same `centralNodes` list |
+
+All nodes use the same `centralNodes` list. Compute nodes connect their `ovn-controller` to the SB DBs (`tcp:<central>:6642`); central nodes additionally serve the DBs and run `ovn-northd`.
+
+**Ports used:** 6641 NB client, 6642 SB client, 6643 NB RAFT, 6644 SB RAFT.
 
 ### Gotcha: OVN vs NixOS run-directory prefix
 
@@ -294,7 +253,7 @@ Without this, `ovn-controller` can't reach `br-int.mgmt` and won't claim logical
 
 ### Usage
 
-**Uplink network** — the OVN networks NAT through an existing managed network (here `incusbr0`). The uplink needs IP ranges reserved for OVN:
+**Uplink network** — OVN networks NAT through an existing managed network (here `incusbr0`). The uplink needs IP ranges reserved for OVN:
 
 ```bash
 incus network set incusbr0 ipv4.dhcp.ranges=10.0.100.100-10.0.100.200
@@ -325,7 +284,7 @@ Both can coexist; OVN handles the common case (isolated tenant subnets with NAT)
 
 ### Virtual Appliance architecture
 
-For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-to-site VPN) beyond OVN, the recommended approach is a **self-managed virtual router appliance** inside their Incus project. Overlay segments like `br-tenant-a` and `br-tenant-b` are **isolated L2 domains** — VMs on one cannot reach VMs on the other by design.
+For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-to-site VPN) beyond OVN, the recommended approach is a **self-managed virtual router appliance** inside their Incus project. Tenant OVN networks are isolated L2 domains — VMs on one cannot reach VMs on another without a router.
 
 ### Architecture
 
@@ -333,9 +292,9 @@ For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-
 ┌─────────────────────────────────────────────────────────────┐
 │                        HYPERVISOR FABRIC                     │
 │  ┌──────────────────┐              ┌──────────────────┐       │
-│  │ br-tenant-a      │              │ br-tenant-b      │       │
-│  │ 10.10.0.0/16     │              │ 10.20.0.0/16     │       │
-│  │ VNI 10           │              │ VNI 20           │       │
+│  │ tenant-a-net     │              │ tenant-b-net     │       │
+│  │ (OVN, per-proj)  │              │ (OVN, per-proj)  │       │
+│  │ DHCP+NAT         │              │ DHCP+NAT         │       │
 │  └────────┬─────────┘              └────────┬─────────┘       │
 │           │                                │                 │
 │           └────────────┬───────────────────┘                 │
@@ -344,8 +303,8 @@ For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-
 │           │  Tenant Router VM         │                      │
 │           │  (OpenWrt / OPNsense)     │                      │
 │           │                           │                      │
-│           │   eth0  ──► uplink to br-tenant-a                │
-│           │   eth1  ──► uplink to br-tenant-b (optional)    │
+│           │   eth0  ──► uplink to OVN network (WAN)        │
+│           │   eth1  ──► uplink to tenant internal net      │
 │           │                           │                      │
 │           │   ┌─────────────────────┐ │                      │
 │           │   │  Inside the VM:     │ │                      │
@@ -360,22 +319,24 @@ For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-
 │           ┌────────────┼────────────┐                        │
 │           ▼            ▼            ▼                        │
 │      [alpha-web] [alpha-db] [alpha-dmz]                   │
-│       Incus nets    managed by the tenant inside their VM   │
+│       tenant nets     managed by the tenant inside their VM │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Note:** With OVN available, most tenants don't need a router VM — they can use `--type=ovn` project networks (DHCP/NAT/ACLs built in). The appliance is for tenants who need full L3 control beyond what OVN offers.
 
 ### Who manages what
 
 | Layer | Platform Admin (You) | Tenant |
 |-------|----------------------|--------|
-| VXLAN / EVPN underlay | ✅ VNIs, bridges, BGP peers | ❌ |
+| OVN underlay | ✅ Central DBs, controllers | ❌ |
 | Physical host | ✅ ZFS, Ceph, Incus daemon | ❌ |
 | Tenant project + quotas | ✅ `incus project create` | ❌ |
-| Uplink attachment to overlay | ✅ `incus config device add` to `br-tenant-*` | ❌ |
+| OVN network in project | ✅ `incus network create --type=ovn` | ✅ (if granted) |
 | Router VM image | ✅ Provide `images:openwrt/23.05` | ❌ |
 | Internal VLANs / subnets | ❌ | ✅ Inside their router VM |
 | Firewall / NAT / VPN | ❌ | ✅ OpenWrt/OPNsense GUI |
-| Downstream VM networks | ❌ | ✅ Incus bridge networks inside their project |
+| Downstream VM networks | ❌ | ✅ OVN networks or local bridges in their project |
 | VM lifecycle | ❌ | ✅ `incus launch` inside their project |
 
 ### Quick start: provision a tenant router
@@ -389,7 +350,7 @@ incus project set $TENANT features.networks=true features.images=true
 incus project set $TENANT limits.instances=20 limits.memory=64GiB
 ```
 
-**2. Admin creates the router VM with overlay uplink(s)**
+**2. Admin creates the router VM with OVN uplink(s)**
 
 A pre-defined `router` profile sets 2 vCPUs, 256 MiB RAM, Secure Boot disabled, and a 2 GB Ceph root disk — perfect for OpenWrt.
 
@@ -397,13 +358,13 @@ A pre-defined `router` profile sets 2 vCPUs, 256 MiB RAM, Secure Boot disabled, 
 incus init images:openwrt/23.05 $TENANT-router --project $TENANT \
   --profile router --vm
 
-# Primary uplink to br-tenant-a
+# Primary uplink to a tenant OVN network (WAN)
 incus config device add $TENANT-router eth0 nic \
-  nictype=bridged parent=br-tenant-a --project $TENANT
+  network=$TENANT-net --project $TENANT
 
-# Optional second uplink (e.g. for DMZ or multi-site)
+# Optional second uplink to another tenant network
 # incus config device add $TENANT-router eth1 nic \
-#   nictype=bridged parent=br-tenant-b --project $TENANT
+#   network=$TENANT-dmz --project $TENANT
 
 incus start $TENANT-router --project $TENANT
 ```
@@ -439,10 +400,10 @@ If the tenant used **macvtap** or **routed** NICs instead of bridges, the router
 
 ### Why this model is ideal
 
-1. **Admin stays out of tenant routing.** The overlay fabric is pure L2 transport. No tenant firewall rules pollute the host nftables.
+1. **Admin stays out of tenant routing.** OVN handles L2+L3+NAT per project. No tenant firewall rules pollute the host nftables.
 2. **Tenant gets full control.** VLANs, subnets, NAT, QoS, VPN — whatever they need, inside their own VM.
-3. **Portable.** The router VM is just another Ceph RBD image. If the tenant moves to another hypervisor, the VM moves with them; uplink to the new host's `br-tenant-*` bridge and they're back online.
-4. **Familiar tooling.** OpenWrt LUCI or OPNsense web UI is a much gentler learning curve than host-level nftables or FRR.
+3. **Portable.** The router VM is just another Ceph RBD image. If the tenant moves to another hypervisor, the VM moves with them; its OVN network uplinks are already available cluster-wide.
+4. **Familiar tooling.** OpenWrt LUCI or OPNsense web UI is a much gentler learning curve than host-level nftables or OVS commands.
 5. **Snapshot the whole network.** Snapshot the router VM before a config change. Rollback in seconds if you break NAT rules.
 
 ### Variation: Linux router instead of OpenWrt
@@ -456,7 +417,7 @@ incus config set $TENANT-router limits.memory=1GiB --project $TENANT
 
 # Same NIC attachments as OpenWrt example above
 # Inside the VM:
-#   apt install frr nftables kea dhcp4-server
+#   apt install nftables kea dhcp4-server
 #   Configure as a standard Linux router with your choice of tooling
 ```
 
@@ -629,7 +590,7 @@ zstd -d container_my-vm-YYYYMMDD-HHMMSS.diff.zst -c | sudo rbd import-diff - rbd
 sudo nixos-rebuild switch
 
 # Check all services
-systemctl is-active incus nftables systemd-networkd frr
+systemctl is-active incus nftables systemd-networkd ovn-northd
 
 # List Incus resources
 incus storage list
@@ -643,9 +604,11 @@ zfs list -t snapshot
 # Ceph status
 sudo ceph -s
 
-# BGP status (when overlay enabled)
-sudo vtysh -c "show bgp l2vpn evpn summary"
-sudo vtysh -c "show bgp l2vpn evpn"
+# Ceph status
+sudo ceph -s
+
+# OVN status
+sudo systemctl status ovn-northd ovn-controller
 ```
 
 ---
@@ -654,7 +617,7 @@ sudo vtysh -c "show bgp l2vpn evpn"
 
 - **Incus UI has no password auth.** Access is via TLS client certificates only.
 - **Firewall is nftables.** Do not enable `networking.firewall.backend = "iptables"` — Incus will refuse to start.
-- **Overlay firewall rules are identical on every host** because they are declared in Nix. This is the "distributed firewall" — there is no runtime agent pushing rules; the Nix expression is the source of truth.
+- **OVN ACLs** provide tenant network isolation natively (per logical network), keeping host nftables rules minimal.
 - **ZFS encryption credentials** are requested at boot if datasets are encrypted.
 
 ---
@@ -663,9 +626,8 @@ sudo vtysh -c "show bgp l2vpn evpn"
 
 Items tracked in `/root/desired.txt` that are not yet implemented:
 - QinQ (double-tagged VLANs)
-- VXLAN tunneling without EVPN (not needed; we use FRR+EVPN)
-- BGP-based EVPN (implemented; active locally, needs `frrPeers` for cross-host)
-- Distributed firewall (implemented as identical nftables configs)
+- OVN multi-central-node RAFT cluster (module supports it; needs 3 hosts to activate)
+- Distributed firewall via OVN ACLs (native, per-project)
 - Single-file restore from remote ZFS snapshots (documented workflow)
 - ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
 - Ceph multi-node expansion (currently single-node only)

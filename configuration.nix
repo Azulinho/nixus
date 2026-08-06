@@ -21,7 +21,6 @@ in
       ./modules/backup.nix
       "${sops-nix}/modules/sops"
       ./modules/users.nix
-      ./modules/overlay-network.nix
       ./modules/ceph.nix
       ./modules/rbd-backup.nix
       ./modules/ovn.nix
@@ -131,24 +130,16 @@ in
     { device = "/dev/zvol/zroot/swap"; }
   ];
 
-  # Multi-host overlay fabric (enabled now for local tenant isolation;
-  # add frrPeers when second hypervisor joins)
-  networking.overlayNetwork = {
-    enable = true;
-    localAddress = "172.16.3.4";
-    frrPeers = [];
-    frrAsn = 64512;
-    vnis = [
-      { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
-      { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
-    ];
-    firewall.enable = true;
-  };
-
-  # OVN SDN controller (test): enables project-scoped networks in Incus
+  # OVN SDN: multi-host tenant networking via Open vSwitch.
+  # Single-node for now: this host is the OVN "central" (DBs + northd) and
+  # also runs the controller. When adding hypervisors, add their IPs to
+  # centralNodes (3 central nodes for HA) and set role = "compute" on the rest.
   networking.ovn = {
     enable = true;
-    encapIp = "172.16.3.4";
+    role = "central";              # "central" (3 nodes) or "compute"
+    centralNodes = [ "172.16.3.4" ];  # underlay IPs of the central nodes
+    nodeIndex = 0;                 # this host's position in centralNodes
+    localAddress = "172.16.3.4";   # this host's underlay IP (geneve)
   };
 
   # Incremental RBD backups to S3-compatible NAS
