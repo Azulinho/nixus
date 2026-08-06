@@ -322,6 +322,68 @@ The cluster is tuned for a single OSD:
 
 ---
 
+## RBD Backups (Incremental to S3 NAS)
+
+A systemd timer runs daily at 02:00 to back up all RBD images incrementally to an S3-compatible NAS via `rclone`.
+
+### How it works
+1. **First run**: `rbd export` → zstd compress → upload full image to S3
+2. **Subsequent runs**: `rbd export-diff --from-snap <last>` → zstd compress → upload delta
+3. **RBD snapshots**: each backup creates a `backup-YYYYMMDD-HHMMSS` snapshot on the image
+4. **Retention**: keeps 7 RBD snapshots and 30 days of S3 backups
+
+### Setup
+Create the credentials file (this is **not** in the Nix store):
+
+```bash
+sudo mkdir -p /var/lib/rbd-backup
+sudo tee /var/lib/rbd-backup/s3.env >/dev/null <<'EOF'
+RCLONE_CONFIG_S3NAS_TYPE=s3
+RCLONE_CONFIG_S3NAS_PROVIDER=Minio
+RCLONE_CONFIG_S3NAS_ENDPOINT=http://your-nas-ip:9000
+RCLONE_CONFIG_S3NAS_ACCESS_KEY_ID=YOUR_KEY
+RCLONE_CONFIG_S3NAS_SECRET_ACCESS_KEY=YOUR_SECRET
+EOF
+sudo chmod 600 /var/lib/rbd-backup/s3.env
+```
+
+### Manual run
+```bash
+sudo systemctl start rbd-backup.service
+sudo journalctl -u rbd-backup.service -f
+```
+
+### S3 layout
+```
+rbd-backups/
+└── rbd/
+    ├── container_my-vm/
+    │   ├── container_my-vm-20260806-020000.zst          (full)
+    │   └── container_my-vm-20260806-020000.diff.zst      (incremental)
+    └── virtual-machine_another-vm/
+        └── ...
+```
+
+### Restore workflow
+```bash
+# 1. Download the base full backup
+rclone copy s3nas:rbd-backups/rbd/container_my-vm/container_my-vm-YYYYMMDD-HHMMSS.zst .
+
+# 2. Download each incremental diff in order
+rclone copy s3nas:rbd-backups/rbd/container_my-vm/container_my-vm-YYYYMMDD-HHMMSS.diff.zst .
+
+# 3. Create a new empty RBD image
+sudo rbd create my-vm-restored --size 10G --pool rbd
+
+# 4. Import full base
+zstd -d container_my-vm-YYYYMMDD-HHMMSS.zst -c | sudo rbd import-diff - rbd/my-vm-restored
+
+# 5. Replay each incremental
+zstd -d container_my-vm-YYYYMMDD-HHMMSS.diff.zst -c | sudo rbd import-diff - rbd/my-vm-restored
+```
+
+---
+
 ## Quick Commands
 
 ```bash

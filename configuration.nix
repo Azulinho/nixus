@@ -16,6 +16,7 @@
       ./modules/users.nix
       ./modules/overlay-network.nix
       ./modules/ceph.nix
+      ./modules/rbd-backup.nix
     ];
 
   # Use the systemd-boot EFI boot loader.
@@ -132,6 +133,19 @@
       { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
     ];
     firewall.enable = true;
+  };
+
+  # Incremental RBD backups to S3-compatible NAS
+  services.rbdBackup = {
+    enable = true;
+    pool = "rbd";
+    rcloneRemote = "s3nas";
+    s3BucketPrefix = "rbd-backups";
+    schedule = "*-*-* 02:00:00";
+    retentionSnapshots = 7;
+    retentionDays = 30;
+    compress = true;
+    credentialsFile = "/var/lib/rbd-backup/s3.env";
   };
 
   # Open ports in the firewall.
