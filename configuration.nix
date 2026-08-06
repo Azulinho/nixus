@@ -4,6 +4,12 @@
 
 { config, lib, pkgs, ... }:
 
+let
+  sops-nix = builtins.fetchTarball {
+    url = "https://github.com/Mic92/sops-nix/archive/master.tar.gz";
+    sha256 = "1iswdpzlyngqlipy14mjmpazx9yybvidpm4sfk74ww9jg3r849b8";
+  };
+in
 {
   imports =
     [ # Include the results of the hardware scan.
@@ -13,6 +19,7 @@
       ./modules/virtualization.nix
       ./modules/networking.nix
       ./modules/backup.nix
+      "${sops-nix}/modules/sops"
       ./modules/users.nix
       ./modules/overlay-network.nix
       ./modules/ceph.nix
@@ -101,6 +108,8 @@
      opencode
      git
      tmux
+     sops
+     age
   ];
 
   # Some programs need SUID wrappers, can be configured further or are
@@ -145,8 +154,13 @@
     retentionSnapshots = 7;
     retentionDays = 30;
     compress = true;
-    credentialsFile = "/var/lib/rbd-backup/s3.env";
+    credentialsFile = config.sops.secrets.rbdBackupS3Env.path;
   };
+
+  # Secrets management via sops-nix
+  sops.defaultSopsFile = ./secrets/secrets.yaml;
+  sops.age.keyFile = "/var/lib/sops/age.key";
+  sops.secrets.rbdBackupS3Env = {};
 
   # Open ports in the firewall.
   # networking.firewall.allowedTCPPorts = [ ... ];

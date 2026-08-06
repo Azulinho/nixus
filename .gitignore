@@ -1,0 +1,11 @@
+# Nix build results
+result
+result-*
+
+# Age private keys (never commit these)
+secrets/age.key
+/var/lib/sops/
+
+# Decrypted secrets (should never appear here, but just in case)
+*.dec
+*.dec.*

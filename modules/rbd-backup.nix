@@ -27,10 +27,12 @@ in
 
     credentialsFile = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/rbd-backup/s3.env";
+      default = "/run/secrets/rbd-backup/s3-env";
       description = ''
         Path to an environment file containing rclone S3 credentials.
-        This file must be created manually and is NOT stored in the Nix store.
+        When using sops-nix, point this to the decrypted secret path
+        (e.g. /run/secrets/rbd-backup/s3-env).
+        This file is never stored in the Nix store.
         Example contents:
           RCLONE_CONFIG_S3NAS_TYPE=s3
           RCLONE_CONFIG_S3NAS_PROVIDER=Minio

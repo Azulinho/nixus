@@ -335,19 +335,29 @@ A systemd timer runs daily at 02:00 to back up all RBD images incrementally to a
 ### Important: S3 single-put limit
 `rclone` is configured with `RCLONE_S3_UPLOAD_CUTOFF=5G` so it streams via a single PUT up to the S3 API limit of 5 GB. Incremental diffs are almost always well under this. If a full export of a very large VM exceeds 5 GB, `rclone` may fall back to multipart buffering with temporary files.
 
-### Setup
-Create the credentials file (this is **not** in the Nix store):
+### Setup (sops-nix)
+Secrets are managed with [sops-nix](https://github.com/Mic92/sops-nix). The encrypted secrets file is tracked in git; only the age **private key** (on the host at `/var/lib/sops/age.key`) can decrypt it.
 
+**1. Edit the encrypted secrets file:**
 ```bash
-sudo mkdir -p /var/lib/rbd-backup
-sudo tee /var/lib/rbd-backup/s3.env >/dev/null <<'EOF'
-RCLONE_CONFIG_S3NAS_TYPE=s3
-RCLONE_CONFIG_S3NAS_PROVIDER=Minio
-RCLONE_CONFIG_S3NAS_ENDPOINT=http://your-nas-ip:9000
-RCLONE_CONFIG_S3NAS_ACCESS_KEY_ID=YOUR_KEY
-RCLONE_CONFIG_S3NAS_SECRET_ACCESS_KEY=YOUR_SECRET
-EOF
-sudo chmod 600 /var/lib/rbd-backup/s3.env
+cd /etc/nixos
+sops secrets/secrets.yaml
+```
+Replace the placeholder values under `rbdBackupS3Env` with your real NAS credentials, then save and exit.
+
+**2. Verify decryption works:**
+```bash
+sudo systemctl restart sops-nix
+sudo cat /run/secrets/rbdBackupS3Env
+```
+
+**3. (One-time host setup)** The age private key was generated at `/var/lib/sops/age.key`. This file is **not in git** and must be preserved across reinstalls.
+
+If you ever need to add a new host, generate a new age key and update `.sops.yaml`:
+```bash
+age-keygen -o /var/lib/sops/age-newhost.key
+# Add the public key to .sops.yaml creation_rules
+sops updatekeys secrets/secrets.yaml
 ```
 
 ### Manual run
