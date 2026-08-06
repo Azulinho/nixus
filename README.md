@@ -257,6 +257,145 @@ NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require ha
 
 ---
 
+## Tenant Self-Managed Virtual Networks (Virtual Appliance)
+
+By default, overlay segments like `br-tenant-a` and `br-tenant-b` are **isolated L2 domains**. VMs on one cannot reach VMs on the other. This is intentional — tenants should not accidentally bridge into each other's traffic.
+
+For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-to-site VPN), the recommended approach is a **self-managed virtual router appliance** inside their Incus project.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        HYPERVISOR FABRIC                     │
+│  ┌──────────────────┐              ┌──────────────────┐       │
+│  │ br-tenant-a      │              │ br-tenant-b      │       │
+│  │ 10.10.0.0/16     │              │ 10.20.0.0/16     │       │
+│  │ VNI 10           │              │ VNI 20           │       │
+│  └────────┬─────────┘              └────────┬─────────┘       │
+│           │                                │                 │
+│           └────────────┬───────────────────┘                 │
+│                        │                                     │
+│           ┌────────────▼─────────────┐                      │
+│           │  Tenant Router VM         │                      │
+│           │  (OpenWrt / OPNsense)     │                      │
+│           │                           │                      │
+│           │   eth0  ──► uplink to br-tenant-a                │
+│           │   eth1  ──► uplink to br-tenant-b (optional)    │
+│           │                           │                      │
+│           │   ┌─────────────────────┐ │                      │
+│           │   │  Inside the VM:     │ │                      │
+│           │   │  • VLAN 10: Web     │ │                      │
+│           │   │  • VLAN 20: DB      │ │                      │
+│           │   │  • VLAN 30: Mgmt    │ │                      │
+│           │   │  • WireGuard VPN    │ │                      │
+│           │   │  • Firewall zones   │ │                      │
+│           │   └─────────────────────┘ │                      │
+│           └───────────────────────────┘                      │
+│                        │                                     │
+│           ┌────────────┼────────────┐                        │
+│           ▼            ▼            ▼                        │
+│      [alpha-web] [alpha-db] [alpha-dmz]                   │
+│       Incus nets    managed by the tenant inside their VM   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Who manages what
+
+| Layer | Platform Admin (You) | Tenant |
+|-------|----------------------|--------|
+| VXLAN / EVPN underlay | ✅ VNIs, bridges, BGP peers | ❌ |
+| Physical host | ✅ ZFS, Ceph, Incus daemon | ❌ |
+| Tenant project + quotas | ✅ `incus project create` | ❌ |
+| Uplink attachment to overlay | ✅ `incus config device add` to `br-tenant-*` | ❌ |
+| Router VM image | ✅ Provide `images:openwrt/23.05` | ❌ |
+| Internal VLANs / subnets | ❌ | ✅ Inside their router VM |
+| Firewall / NAT / VPN | ❌ | ✅ OpenWrt/OPNsense GUI |
+| Downstream VM networks | ❌ | ✅ Incus bridge networks inside their project |
+| VM lifecycle | ❌ | ✅ `incus launch` inside their project |
+
+### Quick start: provision a tenant router
+
+**1. Admin creates the project**
+
+```bash
+TENANT=alpha
+incus project create $TENANT
+incus project set $TENANT features.networks=true features.images=true
+incus project set $TENANT limits.instances=20 limits.memory=64GiB
+```
+
+**2. Admin creates the router VM with overlay uplink(s)**
+
+```bash
+incus init images:openwrt/23.05 $TENANT-router --project $TENANT --vm
+
+# Primary uplink to br-tenant-a
+incus config device add $TENANT-router eth0 nic \
+  nictype=bridged parent=br-tenant-a --project $TENANT
+
+# Optional second uplink (e.g. for DMZ or multi-site)
+# incus config device add $TENANT-router eth1 nic \
+#   nictype=bridged parent=br-tenant-b --project $TENANT
+
+incus start $TENANT-router --project $TENANT
+```
+
+**3. Tenant configures OpenWrt**
+
+```bash
+# Open a console on the router VM
+incus exec $TENANT-router --project $TENANT -- ash
+```
+
+Inside the VM (OpenWrt/OPNsense/Linux):
+
+- Assign `eth0` an IP on the overlay segment (e.g. `10.10.0.254/16`) — this becomes the **default gateway** for the tenant's VMs on that segment.
+- Create **VLAN interfaces** on `eth0` if you want micro-segmentation (`eth0.100`, `eth0.200`).
+- Enable `net.ipv4.ip_forward=1`.
+- Set up **firewall zones** (WAN = eth0, LAN = internal bridges).
+- Run **DHCP + DNS** with dnsmasq for each internal network.
+- Optionally run **WireGuard / OpenVPN** for remote access or site-to-site.
+
+**4. Tenant creates internal networks and VMs**
+
+```bash
+# Inside the tenant's project
+incus network create alpha-web  --project alpha
+incus network create alpha-db   --project alpha
+
+incus launch images:ubuntu/24.04 web1 --project alpha --network alpha-web
+incus launch images:ubuntu/24.04 db1  --project alpha --network alpha-db
+```
+
+If the tenant used **macvtap** or **routed** NICs instead of bridges, the router VM handles all L3 — the downstream VMs use the router as their gateway without needing separate Incus networks.
+
+### Why this model is ideal
+
+1. **Admin stays out of tenant routing.** The overlay fabric is pure L2 transport. No tenant firewall rules pollute the host nftables.
+2. **Tenant gets full control.** VLANs, subnets, NAT, QoS, VPN — whatever they need, inside their own VM.
+3. **Portable.** The router VM is just another Ceph RBD image. If the tenant moves to another hypervisor, the VM moves with them; uplink to the new host's `br-tenant-*` bridge and they're back online.
+4. **Familiar tooling.** OpenWrt LUCI or OPNsense web UI is a much gentler learning curve than host-level nftables or FRR.
+5. **Snapshot the whole network.** Snapshot the router VM before a config change. Rollback in seconds if you break NAT rules.
+
+### Variation: Linux router instead of OpenWrt
+
+For tenants who prefer plain Linux:
+
+```bash
+incus init images:ubuntu/24.04 $TENANT-router --project $TENANT --vm
+# Same NIC attachments as above
+# Inside the VM:
+#   apt install frr nftables kea dhcp4-server
+#   Configure as a standard Linux router with your choice of tooling
+```
+
+### Advanced variation: OVS-based SDN container
+
+For power users who need OpenFlow, traffic mirroring, or custom tunneling, see the discussion in the code comments. This requires a **privileged container** with `security.nesting=true` and `security.syscalls.intercept.mknod=true` so the tenant can run Open vSwitch inside their project.
+
+---
+
 ## Ceph RBD
 
 A single-node Ceph cluster is running with a 20G OSD backed by the ZFS zvol `zroot/ceph-osd0`.
