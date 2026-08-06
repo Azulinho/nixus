@@ -81,6 +81,9 @@
     "net.ipv6.conf.all.forwarding" = 1;
   };
 
+  # Kernel Same-page Merging — deduplicate identical memory pages across VMs
+  hardware.ksm.enable = true;
+
   environment.systemPackages = with pkgs; [
     incus
     qemu_kvm
