@@ -37,12 +37,15 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 │         └─────────────┘                 │
 │                                          │
 │    ┌──────────────────────────────┐    │
-│    │      br-evpn (disabled)      │    │
-│    │      Overlay fabric          │    │
+│    │   Overlay fabric (disabled)  │    │
+│    │  ├─ br-tenant-a  (VNI 10)    │    │
+│    │  ├─ br-tenant-b  (VNI 20)    │    │
+│    │  └─ ... more VNIs            │    │
 │    └──────────────┬───────────────┘    │
 │                   │                      │
 │            ┌──────┴──────┐             │
 │            │  vxlan10   │             │
+│            │  vxlan20   │             │
 │            │(FRR+EVPN)  │             │
 │            └─────────────┘             │
 └─────────────────────────────────────────┘
@@ -64,7 +67,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), kernel sysctl for forwarding |
 | [`modules/networking.nix`](modules/networking.nix) | systemd-networkd, VLAN/bond support, nftables firewall |
 | [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
-| [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, kernel VXLAN, `br-evpn` |
+| [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, multi-VNI, kernel VXLAN |
 | [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `wheel` groups |
 
 ---
@@ -79,7 +82,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | Name | Type | Subnet | NAT | Purpose |
 |------|------|--------|-----|---------|
 | `incusbr0` | Bridge | `10.0.100.0/24` + `fd42:100::/64` | Yes | Default Incus network (VMs/LXC get IPs here) |
-| `br-evpn` | Bridge | Overlay L2 (disabled) | N/A | Stretched fabric across hypervisors (see Overlay) |
+| `br-tenant-a` … | Bridge | Overlay L2 (disabled) | N/A | Stretched tenant segments across hypervisors (see Overlay) |
 
 ### Web UI
 - URL: `https://<host-ip>:8443`
@@ -104,10 +107,14 @@ incus launch images:debian/12 my-vm --vm
 # Create an LXC container
 incus launch images:alpine/3.20 my-ct
 
-# Add a custom bridge profile for the overlay (when enabled)
-incus profile create overlay
-incus profile device add overlay eth0 nic nictype=bridged parent=br-evpn name=eth0
-incus launch images:debian/12 overlay-vm --vm --profile overlay
+# Add custom bridge profiles for overlay segments (when enabled)
+incus profile create tenant-a
+incus profile device add tenant-a eth0 nic nictype=bridged parent=br-tenant-a name=eth0
+incus launch images:debian/12 vm-a --vm --profile tenant-a
+
+incus profile create tenant-b
+incus profile device add tenant-b eth0 nic nictype=bridged parent=br-tenant-b name=eth0
+incus launch images:debian/12 vm-b --vm --profile tenant-b
 ```
 
 ---
@@ -163,12 +170,12 @@ To enable:
 The overlay network is **disabled by default** on a single host.
 
 ### What it does
-When enabled, it creates:
-- `vxlan10` — a kernel VXLAN tunnel interface
-- `br-evpn` — a Linux bridge that VMs and LXC attach to
-- **FRR bgpd** — exchanges EVPN routes so every hypervisor learns which remote VTEP owns which MAC address
+When enabled, it creates one or more isolated overlay segments. Each segment gets:
+- `vxlan<VNI>` — a kernel VXLAN tunnel interface (e.g. `vxlan10`, `vxlan20`)
+- `br-<name>` — a Linux bridge that VMs and LXC attach to for that segment
+- **FRR bgpd** — exchanges EVPN routes for *all* VNIs so every hypervisor learns which remote VTEP owns which MAC address in each segment
 
-This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch.
+This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch. Segments are fully isolated from each other at L2 — they are separate VNIs, not 802.1q VLANs on a shared wire.
 
 ### Enabling on this host
 Add to `configuration.nix`:
@@ -179,12 +186,17 @@ networking.overlayNetwork = {
   localAddress = "172.16.3.4";
   frrPeers = [ "172.16.3.5" ];  # your second hypervisor
   frrAsn = 64512;
-  overlaySubnet = "10.200.0.0/16";
+  vnis = [
+    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
+    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
+  ];
   firewall.enable = true;
 };
 ```
 
 Then `nixos-rebuild switch`.
+
+You can add more segments later by appending to `vnis` and rebuilding. Existing VNIs keep working because FRR advertises all of them.
 
 ### Scaling to many hosts
 
@@ -203,6 +215,10 @@ networking.overlayNetwork = {
   frrPeers = [ "172.16.3.11" "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
   frrRouteReflectorClients = [ "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
   frrAsn = 64512;
+  vnis = [
+    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
+    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
+  ];
 };
 
 # On a regular hypervisor (e.g. 172.16.3.5)
@@ -211,6 +227,10 @@ networking.overlayNetwork = {
   localAddress = "172.16.3.5";
   frrPeers = [ "172.16.3.10" "172.16.3.11" ];  # only the RRs
   frrAsn = 64512;
+  vnis = [
+    { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
+    { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
+  ];
 };
 ```
 

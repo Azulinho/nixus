@@ -7,12 +7,6 @@ in
   options.networking.overlayNetwork = {
     enable = lib.mkEnableOption "multi-host L2 overlay network for VMs/LXC (FRR+EVPN only)";
 
-    vni = lib.mkOption {
-      type = lib.types.int;
-      default = 10;
-      description = "VXLAN Network Identifier (VNI) for the overlay";
-    };
-
     localAddress = lib.mkOption {
       type = lib.types.str;
       example = "172.16.3.4";
@@ -48,20 +42,40 @@ in
       '';
     };
 
-    bridgeName = lib.mkOption {
-      type = lib.types.str;
-      default = "br-evpn";
-      description = "Name of the overlay bridge that VMs/LXC attach to";
-    };
-
-    overlaySubnet = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "10.200.0.0/16";
+    vnis = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          vni = lib.mkOption {
+            type = lib.types.int;
+            description = "VXLAN Network Identifier (VNI) for this segment";
+          };
+          bridgeName = lib.mkOption {
+            type = lib.types.str;
+            description = "Name of the Linux bridge that VMs/LXC attach to for this segment";
+          };
+          overlaySubnet = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            example = "10.200.0.0/16";
+            description = ''
+              IP subnet that lives on this overlay segment (used by distributed firewall rules).
+              Leave null if you run multiple subnets on the same VNI and prefer manual firewall rules.
+            '';
+          };
+        };
+      });
+      default = [];
+      example = lib.literalExpression ''
+        [
+          { vni = 10; bridgeName = "br-tenant-a"; overlaySubnet = "10.10.0.0/16"; }
+          { vni = 20; bridgeName = "br-tenant-b"; overlaySubnet = "10.20.0.0/16"; }
+        ]
+      '';
       description = ''
-        IP subnet that lives on the overlay (used by distributed firewall rules).
-        Leave null if you run multiple subnets on the same VNI and prefer
-        manual firewall rules.
+        List of VXLAN segments to create. Each segment gets its own VNI,
+        its own bridge, and is independently advertised via EVPN.
+        This lets you run multiple isolated L2 domains across the same
+        hypervisor cluster without consuming 802.1q tags.
       '';
     };
 
@@ -93,6 +107,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.vnis != [];
+        message = "networking.overlayNetwork.vnis must contain at least one segment when the overlay is enabled.";
+      }
+    ];
+
     # ─────────────────────────────────────────────────────────────
     # 1. Kernel modules for overlay
     # ─────────────────────────────────────────────────────────────
@@ -106,58 +127,73 @@ in
     };
 
     # ─────────────────────────────────────────────────────────────
-    # 2. VXLAN netdev (learning enabled; FRR populates FDB)
+    # 2. VXLAN netdevs and bridge netdevs (one pair per segment)
     # ─────────────────────────────────────────────────────────────
-    systemd.network.netdevs."30-vxlan-overlay" = {
-      netdevConfig = {
-        Name = "vxlan${toString cfg.vni}";
-        Kind = "vxlan";
-      };
-      extraConfig = ''
-        [VXLAN]
-        VNI=${toString cfg.vni}
-        Local=${cfg.localAddress}
-        DestinationPort=4789
-        Independent=yes
-        Learning=yes
-      '';
-    };
+    systemd.network.netdevs = lib.listToAttrs (lib.concatMap (segment: [
+      {
+        name = "30-vxlan-${toString segment.vni}";
+        value = {
+          netdevConfig = {
+            Name = "vxlan${toString segment.vni}";
+            Kind = "vxlan";
+          };
+          extraConfig = ''
+            [VXLAN]
+            VNI=${toString segment.vni}
+            Local=${cfg.localAddress}
+            DestinationPort=4789
+            Independent=yes
+            Learning=yes
+          '';
+        };
+      }
+      {
+        name = "30-br-${segment.bridgeName}";
+        value = {
+          netdevConfig = {
+            Name = segment.bridgeName;
+            Kind = "bridge";
+          };
+        };
+      }
+    ]) cfg.vnis);
 
     # ─────────────────────────────────────────────────────────────
-    # 3. Overlay bridge via systemd-networkd
+    # 3. Bridge network configs (one per segment)
     # ─────────────────────────────────────────────────────────────
-    systemd.network.netdevs."30-br-overlay" = {
-      netdevConfig = {
-        Name = cfg.bridgeName;
-        Kind = "bridge";
+    systemd.network.networks = lib.listToAttrs (map (segment: {
+      name = "30-br-${segment.bridgeName}";
+      value = {
+        matchConfig.Name = segment.bridgeName;
+        networkConfig = {
+          DHCP = "no";
+          LinkLocalAddressing = "no";
+        };
       };
-    };
-
-    systemd.network.networks."30-br-overlay" = {
-      matchConfig.Name = cfg.bridgeName;
-      networkConfig = {
-        DHCP = "no";
-        LinkLocalAddressing = "no";
-      };
-    };
-
-    # Attach VXLAN interface to the bridge automatically on boot
-    systemd.services.overlay-bridge-setup = {
-      description = "Attach VXLAN tunnel to overlay bridge";
-      after = [ "systemd-networkd.service" ];
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = pkgs.writeShellScript "overlay-bridge-setup" ''
-          ${pkgs.iproute2}/bin/ip link set vxlan${toString cfg.vni} master ${cfg.bridgeName} || true
-          ${pkgs.iproute2}/bin/ip link set vxlan${toString cfg.vni} up || true
-        '';
-      };
-    };
+    }) cfg.vnis);
 
     # ─────────────────────────────────────────────────────────────
-    # 4. FRR + BGP/EVPN (always enabled when overlay is on)
+    # 4. Attach each VXLAN to its bridge on boot
+    # ─────────────────────────────────────────────────────────────
+    systemd.services = lib.listToAttrs (map (segment: {
+      name = "${segment.bridgeName}-setup";
+      value = {
+        description = "Attach VXLAN ${toString segment.vni} to bridge ${segment.bridgeName}";
+        after = [ "systemd-networkd.service" ];
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = pkgs.writeShellScript "${segment.bridgeName}-setup" ''
+            ${pkgs.iproute2}/bin/ip link set vxlan${toString segment.vni} master ${segment.bridgeName} || true
+            ${pkgs.iproute2}/bin/ip link set vxlan${toString segment.vni} up || true
+          '';
+        };
+      };
+    }) cfg.vnis);
+
+    # ─────────────────────────────────────────────────────────────
+    # 5. FRR + BGP/EVPN (advertise-all-vni discovers every VXLAN)
     # ─────────────────────────────────────────────────────────────
     services.frr = {
       zebra = {
@@ -192,25 +228,24 @@ in
     };
 
     # ─────────────────────────────────────────────────────────────
-    # 5. nftables firewall rules for the overlay (distributed)
+    # 6. nftables firewall rules for the overlay (distributed)
     # ─────────────────────────────────────────────────────────────
     networking.nftables.tables.overlay = lib.mkIf cfg.firewall.enable {
       family = "inet";
-      content = let
-        subnetMatch = lib.optionalString (cfg.overlaySubnet != null)
-          ''ip saddr ${cfg.overlaySubnet}'';
-      in ''
+      content = ''
         chain overlay-input {
           type filter hook input priority 0; policy accept;
 
           # Allow traffic from overlay peers to local services
-          ${lib.optionalString cfg.firewall.allowSsh ''
-            ${lib.optionalString (cfg.overlaySubnet != null) ''ip saddr ${cfg.overlaySubnet}''} tcp dport 22 accept
-          ''}
+          ${lib.concatMapStringsSep "\n" (segment:
+            lib.optionalString (cfg.firewall.allowSsh && segment.overlaySubnet != null)
+              ''ip saddr ${segment.overlaySubnet} tcp dport 22 accept''
+          ) cfg.vnis}
 
-          ${lib.optionalString cfg.firewall.allowIncus ''
-            ${lib.optionalString (cfg.overlaySubnet != null) ''ip saddr ${cfg.overlaySubnet}''} tcp dport 8443 accept
-          ''}
+          ${lib.concatMapStringsSep "\n" (segment:
+            lib.optionalString (cfg.firewall.allowIncus && segment.overlaySubnet != null)
+              ''ip saddr ${segment.overlaySubnet} tcp dport 8443 accept''
+          ) cfg.vnis}
 
           ${cfg.firewall.customRules}
         }
@@ -219,9 +254,8 @@ in
           type filter hook forward priority 0; policy accept;
 
           # Inter-VM/container traffic across the overlay
-          # Uncomment the line below to enforce default-deny between
-          # overlay hosts and only allow explicit rules.
-          # ${subnetMatch} ${lib.optionalString (cfg.overlaySubnet != null) "oifname \"${cfg.bridgeName}\""} drop
+          # Uncomment to enforce default-deny and add explicit per-segment rules.
+          # Example: ip saddr 10.10.0.0/16 oifname "br-tenant-a" drop
         }
       '';
     };
