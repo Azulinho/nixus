@@ -83,8 +83,12 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 ## Incus
 
 ### Storage
-- **Pool:** `default` on `zroot/incus` (ZFS, zvols for VMs, datasets for LXC)
-- **Created automatically** by `incus-zfs-prep.service` on first boot.
+| Pool | Driver | Backing | Purpose |
+|------|--------|---------|---------|
+| `default` | ZFS | `zroot/incus` | Local fast storage for VMs/LXC |
+| `ceph` | Ceph RBD | `zroot/ceph-osd0` (Ceph OSD) | Distributed block storage; images clone from base layer |
+
+Both pools are created automatically by Incus preseed on first boot or rebuild.
 
 ### Networks
 | Name | Type | Subnet | NAT | Purpose |
@@ -125,9 +129,15 @@ incus profile create tenant-b
 incus profile device add tenant-b eth0 nic nictype=bridged parent=br-tenant-b name=eth0
 incus launch images:debian/12 vm-b --vm --profile tenant-b
 
-# Create an RBD image (block storage)
+# Create an RBD image (standalone block device)
 sudo rbd create my-disk --size 10G --pool rbd
 sudo rbd info my-disk --pool rbd
+
+# Launch a container using Ceph RBD for its root disk
+incus launch images:ubuntu/24.04 my-ct --profile ceph
+
+# Launch a VM using Ceph RBD
+incus launch images:debian/12 my-vm --vm --profile ceph
 ```
 
 ---
@@ -270,6 +280,23 @@ A single-node Ceph cluster is running with a 20G OSD backed by the ZFS zvol `zro
 | `rbd` | `rbd` | 32 | RADOS Block Device images |
 | `.mgr` | `mgr` | 1 | Internal manager pool |
 
+### Incus integration
+Incus has a `ceph` storage pool (`driver: ceph`) backed by the `rbd` Ceph pool. The `ceph` profile uses this pool for VM and container root disks. Incus creates RBD images automatically — base images are stored as read-only snapshots, and instances are thin-cloned from them.
+
+```bash
+# List Incus storage pools
+incus storage list
+
+# Show Ceph pool config
+incus storage show ceph
+
+# Launch container on Ceph RBD
+incus launch images:ubuntu/24.04 my-ct --profile ceph
+
+# The container's root disk is an RBD image
+sudo rbd ls --pool rbd | grep container_my-ct
+```
+
 ### RBD quick commands
 ```bash
 # Cluster status
@@ -278,7 +305,7 @@ sudo ceph -s
 # List pools
 sudo ceph osd pool ls
 
-# Create an image
+# Create a standalone image
 sudo rbd create my-disk --size 10G --pool rbd
 
 # List images

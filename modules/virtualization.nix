@@ -14,13 +14,22 @@
         "core.https_address" = ":8443";
       };
 
-      # Storage: use ZFS dataset on the existing zroot pool
+      # Storage: local ZFS + distributed Ceph RBD
       storage_pools = [
         {
           name = "default";
           driver = "zfs";
           config = {
             source = "zroot/incus";
+          };
+        }
+        {
+          name = "ceph";
+          driver = "ceph";
+          config = {
+            source = "rbd";
+            "ceph.user.name" = "admin";
+            "ceph.cluster_name" = "ceph";
           };
         }
       ];
@@ -51,6 +60,21 @@
             root = {
               path = "/";
               pool = "default";
+              type = "disk";
+            };
+          };
+        }
+        {
+          name = "ceph";
+          devices = {
+            eth0 = {
+              name = "eth0";
+              network = "incusbr0";
+              type = "nic";
+            };
+            root = {
+              path = "/";
+              pool = "ceph";
               type = "disk";
             };
           };
