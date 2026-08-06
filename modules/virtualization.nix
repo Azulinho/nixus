@@ -12,6 +12,9 @@
     preseed = {
       config = {
         "core.https_address" = ":8443";
+        # OVN SDN integration (project-scoped networks)
+        "network.ovn.northbound_connection" = "unix:/run/ovn/ovnnb_db.sock";
+        "network.ovn.integration_bridge" = "br-int";
       };
 
       # Storage: Ceph RBD only (ZFS pool removed)

@@ -24,6 +24,7 @@ in
       ./modules/overlay-network.nix
       ./modules/ceph.nix
       ./modules/rbd-backup.nix
+      ./modules/ovn.nix
     ];
 
   # Use the systemd-boot EFI boot loader.
@@ -144,6 +145,12 @@ in
     firewall.enable = true;
   };
 
+  # OVN SDN controller (test): enables project-scoped networks in Incus
+  networking.ovn = {
+    enable = true;
+    encapIp = "172.16.3.4";
+  };
+
   # Incremental RBD backups to S3-compatible NAS
   services.rbdBackup = {
     enable = true;
@@ -161,6 +168,9 @@ in
   sops.defaultSopsFile = ./secrets/secrets.yaml;
   sops.age.keyFile = "/var/lib/sops/age.key";
   sops.secrets.rbdBackupS3Env = {};
+
+  # Enable modern Nix CLI (flakes + nix-command)
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   # Open ports in the firewall.
   # networking.firewall.allowedTCPPorts = [ ... ];

@@ -252,16 +252,80 @@ networking.overlayNetwork = {
 
 Adding Host 21 only requires editing **Host 21's** config and adding it to the RR client lists. No rebuilds on existing hosts.
 
-### Why not OVN?
-NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require hand-writing ~5 systemd services and manually integrating them with Incus. FRR+EVPN is fully supported in nixpkgs and achieves the same stretched-L2 result.
+### OVN (enabled — replaces the bridge workaround)
+
+**Update:** OVN is now fully working on this host. See the [OVN SDN](#ovn-sdn) section below. The hand-written `ovn-northd`/`ovn-controller` systemd services live in `modules/ovn.nix`. OVN enables **project-scoped networks** — something the plain-bridge tenant model could not do.
 
 ---
 
-## Tenant Self-Managed Virtual Networks (Virtual Appliance)
+## OVN SDN
 
-By default, overlay segments like `br-tenant-a` and `br-tenant-b` are **isolated L2 domains**. VMs on one cannot reach VMs on the other. This is intentional — tenants should not accidentally bridge into each other's traffic.
+OVN (Open Virtual Network) provides software-defined networking on top of Open vSwitch. It replaces the manual bridge-per-segment model with **logical networks that can be created per-project by tenants**.
 
-For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-to-site VPN), the recommended approach is a **self-managed virtual router appliance** inside their Incus project.
+### Components
+
+| Service | Purpose | Provided by |
+|---------|---------|-------------|
+| `ovsdb` + `ovs-vswitchd` | Open vSwitch base | NixOS `virtualisation.vswitch.enable` |
+| `ovn-nb-db` | OVN Northbound DB (logical topology) | `modules/ovn.nix` |
+| `ovn-sb-db` | OVN Southbound DB (runtime state) | `modules/ovn.nix` |
+| `ovn-northd` | Syncs NB → SB | `modules/ovn.nix` |
+| `ovn-controller` | Local agent on each hypervisor | `modules/ovn.nix` |
+
+### How it was wired up
+
+1. `virtualisation.vswitch.enable = true` starts OVS.
+2. `ovn-nb-db`/`ovn-sb-db` create databases with `ovsdb-tool create` using the OVN schemas, then serve them on unix sockets `/run/ovn/ovnnb_db.sock` and `/run/ovn/ovnsb_db.sock`.
+3. `ovn-northd` connects NB ↔ SB.
+4. `ovn-controller` connects to OVS and the SB DB, registers itself as a chassis (system-id = machine-id), and applies logical flows.
+5. Incus config: `network.ovn.northbound_connection` and `network.ovn.integration_bridge` (set via preseed).
+
+### Gotcha: OVN vs NixOS run-directory prefix
+
+The `ovn` nixpkgs package is compiled with a `/usr/local` prefix, so `ovn-controller` looks for OVS sockets in `/usr/local/var/run/openvswitch/`. NixOS's vswitch module puts them in `/run/openvswitch/`. A tmpfiles symlink bridges the gap:
+
+```nix
+systemd.tmpfiles.rules = [
+  "L+ /usr/local/var/run/openvswitch - - - - /run/openvswitch"
+];
+```
+
+Without this, `ovn-controller` can't reach `br-int.mgmt` and won't claim logical ports (containers get no DHCP address).
+
+### Usage
+
+**Uplink network** — the OVN networks NAT through an existing managed network (here `incusbr0`). The uplink needs IP ranges reserved for OVN:
+
+```bash
+incus network set incusbr0 ipv4.dhcp.ranges=10.0.100.100-10.0.100.200
+incus network set incusbr0 ipv4.ovn.ranges=10.0.100.201-10.0.100.250
+```
+
+**Project-scoped OVN network** — the key win over bridges:
+
+```bash
+incus project create tenant-a
+incus project set tenant-a features.networks=true
+incus network create tenant-net --type=ovn --project tenant-a
+incus launch alpine tenant-a-c1 --project tenant-a --network tenant-net
+```
+
+Each project gets its own logical switch + router, with DHCP, NAT, and (optionally) ACLs managed entirely by OVN.
+
+---
+
+## Tenant Self-Managed Virtual Networks
+
+Tenants have two paths to self-managed networking:
+
+1. **OVN networks** (recommended) — project-scoped `--type=ovn` networks give each tenant their own logical switch + router with DHCP/NAT built in. No extra VMs needed. See [OVN SDN](#ovn-sdn).
+2. **Virtual router appliance** — a self-managed OpenWrt/OPNsense VM for tenants who want full control of VLANs, firewall zones, and site-to-site VPN beyond what OVN provides.
+
+Both can coexist; OVN handles the common case (isolated tenant subnets with NAT), the appliance handles power users.
+
+### Virtual Appliance architecture
+
+For tenants who need **their own internal networks** (VLANs, subnets, NAT, site-to-site VPN) beyond OVN, the recommended approach is a **self-managed virtual router appliance** inside their Incus project. Overlay segments like `br-tenant-a` and `br-tenant-b` are **isolated L2 domains** — VMs on one cannot reach VMs on the other by design.
 
 ### Architecture
 
