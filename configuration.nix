@@ -107,6 +107,11 @@
   # Enable the OpenSSH daemon.
   services.openssh.enable = true;
 
+  # Swap on ZFS zvol
+  swapDevices = [
+    { device = "/dev/zvol/zroot/swap"; }
+  ];
+
   # Multi-host overlay fabric (enabled now for local tenant isolation;
   # add frrPeers when second hypervisor joins)
   networking.overlayNetwork = {

@@ -15,6 +15,9 @@
     monthly = 12;   # keep 12
   };
 
+  # Exclude swap zvol from snapshots (snapshots of swap are useless and waste space)
+  # Set imperatively: zfs set com.sun:auto-snapshot=false zroot/swap
+
   # Remote replication with Syncoid (Sanoid)
   # Enable after setting up SSH keys and a remote target ZFS pool.
   services.syncoid = {
