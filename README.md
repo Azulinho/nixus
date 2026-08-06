@@ -168,7 +168,7 @@ To enable:
    services.syncoid = {
      enable = true;
      commands = {
-       "zroot/incus".target = "backup-server:zroot/backups/nixos/incus";
+       "zroot/root".target = "backup-server:zroot/backups/nixos/root";
      };
      sshKey = "/var/lib/syncoid/ssh.key";
    };

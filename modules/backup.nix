@@ -23,10 +23,6 @@
   services.syncoid = {
     enable = false;
     # commands = {
-    #   "zroot/incus" = {
-    #     target = "backup-server:zroot/backups/${config.networking.hostName}/incus";
-    #     recursive = true;
-    #   };
     #   "zroot/root" = {
     #     target = "backup-server:zroot/backups/${config.networking.hostName}/root";
     #     recursive = true;
@@ -49,7 +45,7 @@
   # To restore a single file from a remote ZFS snapshot:
   #
   #   1. Replicate or mount the remote snapshot locally (read-only):
-  #      zfs send backup-server:zroot/backups/host/incus@auto-2025... | zfs recv zroot/restore
+  #      zfs send backup-server:zroot/backups/host/root@auto-2025... | zfs recv zroot/restore
   #
   #   2. Access the files under the snapshot mount:
   #      ls /zroot/restore/.zfs/snapshot/...
