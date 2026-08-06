@@ -1,0 +1,283 @@
+# NixOS Proxmox-like Virtualization Cluster
+
+This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, Podman, ZFS, and FRR+EVPN. It is designed to run on a single hypervisor today and scale to a multi-host cluster by cloning the configuration to additional NixOS hosts.
+
+## Host
+
+| Property | Value |
+|----------|-------|
+| Hostname | `nixos` |
+| Uplink | `ens18` → `172.16.3.4/24` |
+| Root pool | `zroot` (127 GB, ZFS) |
+| State version | `26.05` |
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────┐
+│            NixOS Host (172.16.3.4)      │
+│  ┌──────────────┐  ┌─────────────────┐  │
+│  │  Incus       │  │  Podman         │  │
+│  │  ├─ KVM VMs  │  │  ├─ OCI containers│ │
+│  │  └─ LXC      │  │  └─ docker compat │ │
+│  │  Web UI:8443 │  │                 │  │
+│  └──────┬───────┘  └────────┬────────┘  │
+│         │                     │          │
+│    ┌────┴────┐           ┌────┴────┐     │
+│    │incusbr0 │           │br-evpn  │     │
+│    │10.0.100.│           │(disabled│     │
+│    │  1/24   │           │by def)  │     │
+│    └────┬────┘           └────┬────┘     │
+│         │                     │          │
+│  ┌──────┴──────┐         ┌────┴────┐   │
+│  │  ens18      │         │vxlan10  │   │
+│  │ 172.16.3.4  │         │(disabled│   │
+│  └─────────────┘         └─────────┘   │
+└─────────────────────────────────────────┘
+```
+
+- **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
+- **Podman** provides OCI containers with Docker compatibility.
+- **ZFS** provides local storage, copy-on-write volumes for VMs/LXC, and automated snapshots.
+- **FRR + EVPN** provides a multi-host L2 overlay fabric (currently disabled; activate when you add a second hypervisor).
+- **nftables** provides IPv4/IPv6 firewalling, both for the host and the overlay network.
+
+---
+
+## Module Breakdown
+
+| File | Purpose |
+|------|---------|
+| [`configuration.nix`](configuration.nix) | Top-level configuration; imports all modules and hardware scan |
+| [`hardware-configuration.nix`](hardware-configuration.nix) | Auto-generated disk/ZFS layout (do not edit) |
+| [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), Podman, kernel sysctl for forwarding |
+| [`modules/networking.nix`](modules/networking.nix) | systemd-networkd, VLAN/bond support, nftables firewall |
+| [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
+| [`modules/overlay-network.nix`](modules/overlay-network.nix) | Multi-host L2 overlay: FRR+BGP/EVPN, kernel VXLAN, `br-evpn` |
+| [`modules/users.nix`](modules/users.nix) | Admin user with `incus-admin`, `podman`, `wheel` groups |
+
+---
+
+## Incus
+
+### Storage
+- **Pool:** `default` on `zroot/incus` (ZFS, zvols for VMs, datasets for LXC)
+- **Created automatically** by `incus-zfs-prep.service` on first boot.
+
+### Networks
+| Name | Type | Subnet | NAT | Purpose |
+|------|------|--------|-----|---------|
+| `incusbr0` | Bridge | `10.0.100.0/24` + `fd42:100::/64` | Yes | Default Incus network (VMs/LXC get IPs here) |
+| `br-evpn` | Bridge | Overlay L2 (disabled) | N/A | Stretched fabric across hypervisors (see Overlay) |
+
+### Web UI
+- URL: `https://<host-ip>:8443`
+- Authentication: **TLS client certificates only** (no passwords)
+- To generate a login token:
+  ```bash
+  sudo incus config trust add my-workstation
+  ```
+  Paste the token into the browser UI.
+
+### Console
+- Incus VMs and LXC containers can be accessed via:
+  - **Web UI** (HTML5/SPICE)
+  - **CLI:** `incus console <name>`
+- `virt-viewer` is installed for SPICE-based local console access.
+
+### Quick start
+```bash
+# Create a VM
+incus launch images:debian/12 my-vm --vm
+
+# Create an LXC container
+incus launch images:alpine/3.20 my-ct
+
+# Add a custom bridge profile for the overlay (when enabled)
+incus profile create overlay
+incus profile device add overlay eth0 nic nictype=bridged parent=br-evpn name=eth0
+incus launch images:debian/12 overlay-vm --vm --profile overlay
+```
+
+---
+
+## Podman
+
+- **Rootful daemon** with Docker socket compatibility
+- Default network has DNS enabled
+- An overlay network `evpn` is auto-created on `br-evpn` when the overlay module is enabled
+
+```bash
+# Run a container on the default network
+podman run -it alpine
+
+# Run a container on the overlay (when enabled)
+podman run --network=evpn --ip=10.200.0.50 -it alpine
+```
+
+---
+
+## Firewall
+
+- **Backend:** `nftables` (required by Incus)
+- **Host rules:** defined in `modules/networking.nix`
+  - SSH (22) and Incus UI (8443) are open
+  - Forwarding is allowed for bridges
+- **Overlay rules:** defined in `modules/overlay-network.nix`
+  - Identical on every hypervisor → **distributed firewall**
+  - Custom rules can be added via `networking.overlayNetwork.firewall.customRules`
+
+---
+
+## Backup & Snapshots
+
+### ZFS Auto-Snapshots
+| Interval | Retention | Timer |
+|----------|-----------|-------|
+| 15 minutes | 4 copies | `zfs-snapshot-frequent.timer` |
+| Hourly | 24 copies | `zfs-snapshot-hourly.timer` |
+| Daily | 7 copies | `zfs-snapshot-daily.timer` |
+| Weekly | 4 copies | `zfs-snapshot-weekly.timer` |
+| Monthly | 12 copies | `zfs-snapshot-monthly.timer` |
+
+### Remote Replication (syncoid)
+Configured but **disabled by default** in `modules/backup.nix`.
+
+To enable:
+1. Set up SSH key-based access to a remote ZFS host
+2. Edit `modules/backup.nix`:
+   ```nix
+   services.syncoid = {
+     enable = true;
+     commands = {
+       "zroot/incus".target = "backup-server:zroot/backups/nixos/incus";
+     };
+     sshKey = "/var/lib/syncoid/ssh.key";
+   };
+   ```
+3. `nixos-rebuild switch`
+
+### Single-file restore
+- Mount a remote snapshot locally: `zfs send ... | zfs recv zroot/restore`
+- Access files under the snapshot path: `/zroot/restore/.zfs/snapshot/...`
+
+---
+
+## Multi-Host Overlay (FRR + BGP/EVPN)
+
+The overlay network is **disabled by default** on a single host.
+
+### What it does
+When enabled, it creates:
+- `vxlan10` — a kernel VXLAN tunnel interface
+- `br-evpn` — a Linux bridge that VMs, LXC, and Podman attach to
+- **FRR bgpd** — exchanges EVPN routes so every hypervisor learns which remote VTEP owns which MAC address
+
+This makes VMs and containers on Host A reachable from VMs and containers on Host B as if they were on the same physical switch.
+
+### Enabling on this host
+Add to `configuration.nix`:
+
+```nix
+networking.overlayNetwork = {
+  enable = true;
+  localAddress = "172.16.3.4";
+  frrPeers = [ "172.16.3.5" ];  # your second hypervisor
+  frrAsn = 64512;
+  overlaySubnet = "10.200.0.0/16";
+  firewall.enable = true;
+};
+```
+
+Then `nixos-rebuild switch`.
+
+### Scaling to many hosts
+
+| Cluster Size | Topology | Config |
+|--------------|----------|--------|
+| 2–10 | Full mesh | Each host lists all others in `frrPeers` |
+| 10–20 | Full mesh (tedious) or early RRs | Same, or promote 2 hosts to RRs |
+| 20+ | **Route Reflectors** | 2–3 RRs carry full peer list; regular hosts only peer with RRs |
+
+#### Route Reflector example
+```nix
+# On the RR host (e.g. 172.16.3.10)
+networking.overlayNetwork = {
+  enable = true;
+  localAddress = "172.16.3.10";
+  frrPeers = [ "172.16.3.11" "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
+  frrRouteReflectorClients = [ "172.16.3.1" "172.16.3.2" /* ... all clients ... */ ];
+  frrAsn = 64512;
+};
+
+# On a regular hypervisor (e.g. 172.16.3.5)
+networking.overlayNetwork = {
+  enable = true;
+  localAddress = "172.16.3.5";
+  frrPeers = [ "172.16.3.10" "172.16.3.11" ];  # only the RRs
+  frrAsn = 64512;
+};
+```
+
+Adding Host 21 only requires editing **Host 21's** config and adding it to the RR client lists. No rebuilds on existing hosts.
+
+### Why not OVN?
+NixOS has no `ovn-northd` or `ovn-controller` module. Using OVN would require hand-writing ~5 systemd services and manually integrating them with Incus. FRR+EVPN is fully supported in nixpkgs and achieves the same stretched-L2 result.
+
+---
+
+## Quick Commands
+
+```bash
+# Rebuild the system
+sudo nixos-rebuild switch
+
+# Check all services
+systemctl is-active incus podman.socket nftables systemd-networkd
+
+# List Incus resources
+incus storage list
+incus network list
+incus profile list
+
+# ZFS status
+zpool status
+zfs list -t snapshot
+
+# Podman status
+podman info
+podman network ls
+
+# BGP status (when overlay enabled)
+sudo vtysh -c "show bgp l2vpn evpn summary"
+sudo vtysh -c "show bgp l2vpn evpn"
+```
+
+---
+
+## Security Notes
+
+- **Incus UI has no password auth.** Access is via TLS client certificates only.
+- **Firewall is nftables.** Do not enable `networking.firewall.backend = "iptables"` — Incus will refuse to start.
+- **Overlay firewall rules are identical on every host** because they are declared in Nix. This is the "distributed firewall" — there is no runtime agent pushing rules; the Nix expression is the source of truth.
+- **ZFS encryption credentials** are requested at boot if datasets are encrypted.
+
+---
+
+## Future Roadmap
+
+Items tracked in `/root/desired.txt` that are not yet implemented:
+- QinQ (double-tagged VLANs)
+- VXLAN tunneling without EVPN (not needed; we use FRR+EVPN)
+- BGP-based EVPN (implemented; needs second host to activate)
+- Distributed firewall (implemented as identical nftables configs)
+- Single-file restore from remote ZFS snapshots (documented workflow)
+- ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
+
+---
+
+## License
+
+This configuration is specific to this NixOS installation. Adapt as needed for your own hosts.
