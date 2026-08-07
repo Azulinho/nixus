@@ -13,11 +13,27 @@ let
   phase1 = pkgs.writeShellScript "ceph-bootstrap-phase1" ''
     set -euo pipefail
     SENTINEL=/var/lib/ceph/.phase1-done
-    [ -f "$SENTINEL" ] && exit 0
+
+    # Idempotency: skip if phase1 already ran (sentinel) OR the mon
+    # filesystem is already initialized (done marker). Checking the mon
+    # state directly guards against a lost sentinel after reboot: stale
+    # ceph-owned keyrings left in persistent /tmp would otherwise make
+    # ceph-authtool fail with EACCES (fs.protected_regular blocks root
+    # from O_CREAT-overwriting other-owner files in sticky /tmp) and a
+    # re-run would also clobber the existing admin keyring.
+    if [ -f "$SENTINEL" ] || [ -f /var/lib/ceph/mon/ceph-a/done ]; then
+      touch "$SENTINEL"
+      exit 0
+    fi
 
     mkdir -p /var/lib/ceph/mon/ceph-a
     mkdir -p /etc/ceph
     chown -R ceph:ceph /var/lib/ceph/mon/ceph-a
+
+    # Remove stale keyrings/monmap from previous bootstrap attempts.
+    # They may be owned by ceph:ceph, and with fs.protected_regular=1
+    # root cannot O_CREAT-overwrite files owned by others inside /tmp.
+    rm -f /tmp/ceph.mon.keyring /tmp/monmap
 
     # Generate mon keyring
     ${pkgs.ceph.out}/bin/ceph-authtool --create-keyring /tmp/ceph.mon.keyring \

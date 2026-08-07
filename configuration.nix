@@ -73,6 +73,11 @@ in
   boot.zfs.requestEncryptionCredentials = true;
   networking.hostId = settings.hostId;
 
+  # /tmp on tmpfs (RAM): wiped on every reboot, so stale files (e.g. leftover
+  # Ceph bootstrap keyrings) can never linger and trip up idempotent services.
+  # Default size is 50% of RAM (≈3.8G here); tune with boot.tmp.tmpfsSize.
+  boot.tmp.useTmpfs = true;
+
   # Enable zswap: compressed RAM cache for swap pages
   boot.kernelParams = [
     "zswap.enabled=1"
