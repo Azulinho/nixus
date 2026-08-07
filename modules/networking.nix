@@ -58,6 +58,17 @@
 
     # Allow forwarding traffic for Incus bridges and Podman networks
     filterForward = false;
+
+    # DNS/DHCP terminate on the host's bridge address (dnsmasq on incusbr0):
+    # - Bridge instances resolve via dnsmasq on 10.0.100.1:53
+    # - OVN networks hand out the uplink gateway (10.0.100.1) as their DNS
+    #   server via DHCP option 6, so their queries also land here
+    # - DHCPv4 (67) / DHCPv6 (547) are answered by the same dnsmasq
+    # Scoped to incusbr0 only — the host's DNS is not exposed on ens18.
+    interfaces.incusbr0 = {
+      allowedTCPPorts = [ 53 ];
+      allowedUDPPorts = [ 53 67 547 ];
+    };
   };
 
   # ============================================================================
