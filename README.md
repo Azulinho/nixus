@@ -385,6 +385,15 @@ Incus 7.0.1 does **not** generate name→IP records for OVN instances (`dns.zone
 
 Records are auto-discovered for **all** projects — no per-project config. Cross-project resolution works automatically (one resolver holds every project's zone).
 
+**Opting a project out (private DNS):** mark it private and the refresh script stops publishing it — its names resolve nowhere (NXDOMAIN), including from the project's own instances:
+
+```bash
+incus project set project1 user.dns_private=true    # records stop being published
+incus project unset project1 user.dns_private       # publish again
+```
+
+Privacy here means *non-discoverability*: DNS names are not a security boundary (the real isolation is OVN L2/L3 segmentation + firewall). Two caveats: instances on **bridge** networks are still auto-registered by Incus itself as `<name>.incus` regardless of this flag, so private projects should use OVN networks only; and the flag key is configurable via `services.incusDns.privateFlag`.
+
 Usage — per project, when creating its OVN network:
 
 ```bash

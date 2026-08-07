@@ -16,6 +16,10 @@
 #         <instance>.<project>.<zone>
 #   - SIGHUPs dnsmasq to reload
 #
+# Projects marked private via the config key `services.incusDns.privateFlag`
+# (default `user.dns_private=true`) are skipped entirely: their names are
+# never published and resolve nowhere, not even inside the project.
+#
 # Combined with `incus network set <net> dns.search=<project>.<zone>` on each
 # project's OVN network, instances resolve peers by short name too, e.g.
 #     vm1  →  vm1.project1.incus-cluster1.mydomain → 10.230.79.2
@@ -51,6 +55,14 @@ let
     # All projects ("default (current)" is normalised to "default").
     while read -r project; do
       [ -n "$project" ] || continue
+
+      # Opt-out: private projects get no records at all — their names
+      # resolve nowhere (NXDOMAIN), including from their own instances.
+      # Files are rebuilt from scratch each run, so nothing lingers.
+      PRIVATE=$("$INCUS" project get "$project" ${lib.escapeShellArg cfg.privateFlag} 2>/dev/null || true)
+      if [ "$PRIVATE" = "true" ]; then
+        continue
+      fi
 
       out="$HOSTS_DIR/$project"
       : > "$out"
@@ -98,6 +110,18 @@ in
       type = lib.types.int;
       default = 60;
       description = "Seconds between refreshes of instance DNS records.";
+    };
+
+    privateFlag = lib.mkOption {
+      type = lib.types.str;
+      default = "user.dns_private";
+      description = ''
+        Project config key that opts a project out of DNS publication.
+        When set to "true" (e.g. `incus project set project1 user.dns_private=true`),
+        the refresh script skips the project entirely: its instances get no
+        records in the fabric resolver and their names resolve nowhere
+        (NXDOMAIN), including from the project's own instances.
+      '';
     };
   };
 
