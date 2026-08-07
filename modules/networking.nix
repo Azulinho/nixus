@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, settings, ... }:
 
 {
   # ============================================================================
@@ -9,9 +9,10 @@
   networking.useNetworkd = true;
   networking.networkmanager.enable = lib.mkForce false;
 
-  # Base uplink (detected as ens18 on this host)
-  systemd.network.networks."10-ens18" = {
-    matchConfig.Name = "ens18";
+  # Base uplink — interface name is per-host, from local/settings.nix
+  # (uplinkInterface, auto-detected by nixos-generate-config at install time).
+  systemd.network.networks."10-${settings.uplinkInterface}" = {
+    matchConfig.Name = settings.uplinkInterface;
     networkConfig = {
       DHCP = "yes";
       IPv6AcceptRA = true;
@@ -51,9 +52,25 @@
     allowPing = true;
 
     # Allow SSH and Incus HTTPS / Web UI
-    allowedTCPPorts = [
-      22    # SSH
-      8443  # Incus UI / API
+    allowedTCPPorts =
+      [
+        22    # SSH
+        8443  # Incus UI / API
+      ]
+      # OVN SDN (multi-host): central nodes listen on the NB/SB OVSDB ports
+      # and form a RAFT cluster with their neighbours. Every node in this
+      # cluster is central+compute, so these are open on all three.
+      ++ lib.optionals (config.networking.ovn.enable && config.networking.ovn.role == "central") [
+        6641  # OVN northbound DB (clients: incusd, ovn-northd, ovn-controller)
+        6642  # OVN southbound DB (clients: ovn-controller)
+        6643  # OVN NB RAFT cluster port (between centrals)
+        6644  # OVN SB RAFT cluster port (between centrals)
+      ];
+
+    # Geneve encapsulation between hypervisors — required on EVERY node,
+    # central or compute (all nodes in this cluster are both).
+    allowedUDPPorts = lib.optionals config.networking.ovn.enable [
+      6081  # OVN geneve tunnels
     ];
 
     # Allow forwarding traffic for Incus bridges and Podman networks

@@ -1,9 +1,11 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, settings, ... }:
 
 let
   cfg = config.services.ceph;
-  monIp = "172.16.3.4";
-  fsid = "ede5176c-2777-4e6d-9cf1-529d4dfe0057";
+  # Single-node Ceph on every host: the mon binds to THIS host's underlay IP.
+  monIp = settings.localAddress;
+  # Ceph cluster FSID — generated once, stored in local/settings.nix.
+  fsid = settings.cephFsid;
 
   # ─────────────────────────────────────────────────────────────
   # Phase 1: create mon filesystem and keyrings (before ceph-mon)

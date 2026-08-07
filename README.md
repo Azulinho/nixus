@@ -70,7 +70,9 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 | File | Purpose |
 |------|---------|
 | [`configuration.nix`](configuration.nix) | Top-level configuration; imports all modules and hardware scan |
-| [`hardware-configuration.nix`](hardware-configuration.nix) | Auto-generated disk/ZFS layout (do not edit) |
+| [`local/settings.nix`](local/settings.nix) | **Per-host values as a `hosts` dictionary** (hostId, IPs, nodeIndex, FSID…) — one entry per node, committed for all hosts |
+| `/etc/nixos/hostname` (gitignored) | One line: this host's name (e.g. `node1`) — selects the `hosts.<name>` entry |
+| [`local/<hostname>-hardware-configuration.nix`](local/node1-hardware-configuration.nix) | Per-host hardware scan (`nixos-generate-config` output, do not edit by hand) — one file per node, all committed |
 | [`modules/virtualization.nix`](modules/virtualization.nix) | Incus (KVM+LXC+UI), kernel sysctl for forwarding |
 | [`modules/networking.nix`](modules/networking.nix) | systemd-networkd, VLAN/bond support, nftables firewall |
 | [`modules/backup.nix`](modules/backup.nix) | ZFS auto-snapshots, syncoid for remote replication |
@@ -220,33 +222,61 @@ OVN (Open Virtual Network) is the SDN layer for this fabric. It replaces the ear
 
 `modules/ovn.nix` defines two roles:
 
-- **`central`** — runs the NB/SB databases and `ovn-northd`. Use on the **first 3 hosts**. With 3 central nodes the databases form a RAFT cluster (quorum survives 1 failure). With 1 node the DBs run standalone (no HA).
-- **`compute`** — runs only OVS + `ovn-controller`. Use on all other hosts.
+- **`central`** — runs the NB/SB databases and `ovn-northd`, **and** the local `ovn-controller` (the controller runs on every host regardless of role). A central node is therefore simultaneously a compute/hypervisor node. Use on the **first 3 hosts**: the databases form a RAFT cluster (quorum survives 1 failure). With 1 node the DBs run standalone (no HA).
+- **`compute`** — runs only OVS + `ovn-controller`. Use for 4th+ hypervisors.
 
-### Current configuration (single host)
+**This cluster: node1..3 are all `central`** — every node is both a control-plane member and a hypervisor.
+
+### Current configuration (3 nodes, all central+compute)
+
+**`local/settings.nix`** holds a `hosts` dictionary — one entry per node — plus
+cluster-wide keys. **`/etc/nixos/hostname`** (gitignored, one line) picks the
+active host. `configuration.nix` reads that name, merges `hosts.<name>` with
+the cluster-wide keys, and exposes the result to every module as the
+`settings` argument:
 
 ```nix
-networking.ovn = {
-  enable = true;
-  role = "central";
-  centralNodes = [ "172.16.3.4" ];   # 1 node = standalone DBs
-  nodeIndex = 0;
-  localAddress = "172.16.3.4";       # underlay IP (geneve encap)
-};
+# local/settings.nix — committed once, serves all hosts
+{
+  hosts = {
+    node1 = { hostId = "01234567"; localAddress = "172.16.3.4"; nodeIndex = 0; uplinkInterface = "ens18"; timeZone = "Europe/London"; };
+    node2 = { hostId = "…";        localAddress = "172.16.3.5"; nodeIndex = 1; uplinkInterface = "ens18"; timeZone = "Europe/London"; };
+    node3 = { hostId = "…";        localAddress = "172.16.3.6"; nodeIndex = 2; uplinkInterface = "ens18"; timeZone = "Europe/London"; };
+  };
+  centralNodes = [ "172.16.3.4" "172.16.3.5" "172.16.3.6" ];  # SAME on every host
+  dnsZone = "incus-cluster1.mydomain";
+  cephFsid = "ede5176c-2777-4e6d-9cf1-529d4dfe0057";          # cluster identity
+}
+
+# /etc/nixos/hostname  (gitignored, one line per machine)
+node1
 ```
 
-### Scaling to 3 central + 27 compute hosts
+`cluster.https_address`, the Ceph `monIp` and `network.ovn.northbound_connection`
+are all derived from `settings`, so cloning a host is: copy the repo → create
+`/etc/nixos/hostname` with the host's name (its entry is already in
+`settings.nix`) → generate and commit `local/<hostname>-hardware-configuration.nix`
+(`nixos-generate-config --dir /etc/nixos/local && mv …`) → re-encrypt
+`secrets/secrets.yaml` for the new host's age key.
 
-| Host | Config |
-|------|--------|
-| Central 1 (172.16.3.1) | `role = "central"`, `centralNodes = ["172.16.3.1" "172.16.3.2" "172.16.3.3"]`, `nodeIndex = 0` |
-| Central 2 (172.16.3.2) | same list, `nodeIndex = 1` |
-| Central 3 (172.16.3.3) | same list, `nodeIndex = 2` |
-| Compute 4..30 | `role = "compute"`, same `centralNodes` list |
+### Scaling to N hosts
+
+| Host | Setup |
+|------|-------|
+| node1 (172.16.3.4) | `/etc/nixos/hostname` → `node1` (entry: `localAddress = "172.16.3.4"`, `nodeIndex = 0`) |
+| node2 (172.16.3.5) | `/etc/nixos/hostname` → `node2` (entry: `localAddress = "172.16.3.5"`, `nodeIndex = 1`) |
+| node3 (172.16.3.6) | `/etc/nixos/hostname` → `node3` (entry: `localAddress = "172.16.3.6"`, `nodeIndex = 2`) |
+| Compute 4..N | add a `hosts.<name>` entry in `local/settings.nix`, set `role = "compute"` in `configuration.nix` |
 
 All nodes use the same `centralNodes` list. Compute nodes connect their `ovn-controller` to the SB DBs (`tcp:<central>:6642`); central nodes additionally serve the DBs and run `ovn-northd`.
 
-**Ports used:** 6641 NB client, 6642 SB client, 6643 NB RAFT, 6644 SB RAFT.
+**Ports used:** 6641 NB client, 6642 SB client, 6643 NB RAFT, 6644 SB RAFT, 6081/UDP geneve. `modules/networking.nix` opens 6641–6644/TCP when `role = "central"` and 6081/UDP whenever OVN is enabled.
+
+### Gotchas (OVN)
+
+- **Standalone → RAFT migration.** The current DBs were bootstrapped standalone (`ovsdb-tool create`), and the pre-start script only bootstraps when `/var/lib/ovn/ovnnb.db` / `ovnsb.db` don't exist — editing `centralNodes` alone will **not** re-cluster them. To convert: stop OVN on all three hosts, delete both DB files on **all** hosts, then boot **node1 first** (runs `create-cluster`), then node2, then node3 (each runs `join-cluster` automatically).
+- **Incus ↔ OVN NB is a single remote.** `network.ovn.northbound_connection` takes one address (node1). OVSDB RAFT redirect covers leader changes while node1 is reachable, but if node1 is fully down, incusd's OVN integration has no NB connection until it returns. (`ovn-northd`/`ovn-controller` are unaffected — they use the full comma-separated remote list.)
+- **Bridge networks keep the same subnet on every member.** Incus does **not** split `ipv4.address=10.0.100.1/24` per member — verified in the v7.0.1 source: the only member-specific network keys are `bridge.external_interfaces`, `parent`, `bgp.ipv4.nexthop`, `bgp.ipv6.nexthop` and `tunnel.*`, and cluster network creation applies the identical config on all members. So every node runs its own `incusbr0` with the same `10.0.100.1/24` behind NAT → **per-member L2 islands**: instances on different nodes can hold the same `10.0.100.x` address and cannot reach each other at those IPs across nodes. Cross-node instance traffic must use an **OVN network** (cluster-wide, routed over geneve). DHCP leases are per-node (each member's dnsmasq runs the same ranges independently — harmless on isolated bridges) and OVN external-IP allocation is cluster-wide (no collisions between members).
 
 ### Gotcha: OVN vs NixOS run-directory prefix
 
@@ -297,16 +327,26 @@ Clustering spans three independent layers that must all be in place:
 ### What's already declared in the config
 
 ```nix
-# modules/virtualization.nix — identical on every member except the IP
+# modules/virtualization.nix — identical on every member (no per-node edits)
 preseed.config = {
   "core.https_address" = ":8443";
-  "cluster.https_address" = "172.16.3.4:8443";   # this node's underlay IP
-  "network.ovn.northbound_connection" = "tcp:172.16.3.4:6641";
+  "cluster.https_address" = "${settings.localAddress}:8443";      # derived from per-host localAddress
+  "network.ovn.northbound_connection" = "tcp:${lib.elemAt settings.centralNodes 0}:6641";  # node1 (single NB remote)
   "network.ovn.integration_bridge" = "br-int";
 };
 ```
 
-Each new host clones the config and sets `cluster.https_address` to **its own** underlay IP. Wildcard addresses (`:8443`) are rejected by Incus for cluster traffic — a concrete address is required.
+Each new host clones the repo and creates **`/etc/nixos/hostname`** with its own
+name (e.g. `echo node2 > /etc/nixos/hostname`) — its per-host values are already
+in the `hosts` dictionary of `local/settings.nix`. Its hardware layout is a
+committed per-host file too: generate it with `nixos-generate-config --dir
+/etc/nixos/local` and commit it as `local/node2-hardware-configuration.nix`
+(configuration.nix imports `local/<hostname>-hardware-configuration.nix`
+automatically). (Plus re-encrypt `secrets/secrets.yaml` for the new host's age
+key — see [Secrets (sops-nix)](#setup-sops-nix).) `cluster.https_address` and
+the OVN NB remote are derived from `settings`, so nothing in the modules needs
+editing. Wildcard addresses (`:8443`) are rejected by Incus for cluster traffic
+— a concrete address is required.
 
 ### Why the join is imperative (and survives reboots)
 
@@ -379,7 +419,7 @@ Without it: OVN/bridge instances cannot resolve anything (timeout), and bridge i
 
 Incus 7.0.1 does **not** generate name→IP records for OVN instances (`dns.zone` is rejected on OVN networks; `dns.mode` is inert with the dnsmasq backend). `modules/incus-dns.nix` closes that gap:
 
-- `services.incusDns.enable` + `services.incusDns.zone` (e.g. `incus-cluster1.mydomain`) — enabled in `configuration.nix`
+- `services.incusDns.enable` + `services.incusDns.zone` (e.g. `incus-cluster1.mydomain`) — zone comes from `local/settings.nix` (`dnsZone`), enabled in `configuration.nix`
 - `raw.dnsmasq = "addn-hosts=/run/incus-dns/hosts.d"` on `incusbr0` (preseed) hooks a hosts dir into the uplink dnsmasq
 - `incus-dns-refresh.timer` (every 60 s) reads `incus list` per project and writes `IP <name>.<project>.<zone> <name>` per project, then SIGHUPs dnsmasq
 

@@ -5,15 +5,51 @@
 { config, lib, pkgs, ... }:
 
 let
+  # All per-host + cluster-wide settings — see local/settings.nix.
+  settingsAll = import ./local/settings.nix;
+
+  # This host's name: the key into `settingsAll.hosts`. The file
+  # /etc/nixos/hostname is a single line ("node1", "node2", …) and is
+  # gitignored so each host carries its own copy in the same repo.
+  hostName =
+    if builtins.pathExists ./hostname then
+      lib.trim (builtins.readFile ./hostname)
+    else
+      throw ''
+        Missing /etc/nixos/hostname — create it with this host's name, e.g.:
+          echo node1 > /etc/nixos/hostname
+        Known hosts (keys of `hosts` in local/settings.nix):
+          ${builtins.concatStringsSep " " (builtins.attrNames settingsAll.hosts)}
+      '';
+
+  # Per-host values for THIS host, merged with the cluster-wide keys.
+  # Exposed to every module as the `settings` argument via _module.args.
+  settings = { hostName = hostName; }
+    // (settingsAll.hosts.${hostName} or (throw ''
+         local/settings.nix has no entry for host "${hostName}".
+         Add a `hosts.${hostName} = { … };` block (copy an existing node).
+       ''))
+    // removeAttrs settingsAll [ "hosts" ];
+
   sops-nix = builtins.fetchTarball {
     url = "https://github.com/Mic92/sops-nix/archive/master.tar.gz";
     sha256 = "1iswdpzlyngqlipy14mjmpazx9yybvidpm4sfk74ww9jg3r849b8";
   };
 in
 {
+  # Make local/settings.nix available to all modules as `settings`.
+  _module.args.settings = settings;
+
   imports =
-    [ # Include the results of the hardware scan.
-      ./hardware-configuration.nix
+    [ # Per-host hardware scan (nixos-generate-config output), keyed by hostname.
+      (if builtins.pathExists ./local/${hostName}-hardware-configuration.nix then
+         ./local/${hostName}-hardware-configuration.nix
+       else
+         throw ''
+           Missing local/${hostName}-hardware-configuration.nix — generate it on this host and commit it:
+             nixos-generate-config --dir /etc/nixos/local
+             mv /etc/nixos/local/hardware-configuration.nix /etc/nixos/local/${hostName}-hardware-configuration.nix
+         '')
 
       # Proxmox-like feature modules
       ./modules/virtualization.nix
@@ -35,7 +71,7 @@ in
 
   boot.supportedFilesystems = [ "zfs" ];
   boot.zfs.requestEncryptionCredentials = true;
-  networking.hostId = "01234567";
+  networking.hostId = settings.hostId;
 
   # Enable zswap: compressed RAM cache for swap pages
   boot.kernelParams = [
@@ -45,13 +81,14 @@ in
   ];
 
 
-  # networking.hostName = "nixos"; # Define your hostname.
+  # networking.hostName comes from local/settings.nix (per-host).
+  networking.hostName = settings.hostName;
 
   # Configure network connections interactively with nmcli or nmtui.
   networking.networkmanager.enable = true;
 
-  # Set your time zone.
-  time.timeZone = "Europe/London";
+  # Set your time zone (per-host value from local/settings.nix).
+  time.timeZone = settings.timeZone;
 
   # Configure network proxy if necessary
   # networking.proxy.default = "http://user:password@proxy:port/";
@@ -130,7 +167,7 @@ in
   # through the uplink dnsmasq (see modules/incus-dns.nix).
   services.incusDns = {
     enable = true;
-    zone = "incus-cluster1.mydomain";
+    zone = settings.dnsZone;
   };
 
   # Swap on ZFS zvol
@@ -138,16 +175,18 @@ in
     { device = "/dev/zvol/zroot/swap"; }
   ];
 
-  # OVN SDN: multi-host tenant networking via Open vSwitch.
-  # Single-node for now: this host is the OVN "central" (DBs + northd) and
-  # also runs the controller. When adding hypervisors, add their IPs to
-  # centralNodes (3 central nodes for HA) and set role = "compute" on the rest.
+  # OVN SDN: every node is BOTH central AND compute. All three hosts run the
+  # NB/SB DBs + ovn-northd (central) and the local ovn-controller (compute) —
+  # the three centrals form a RAFT-quorum control plane (survives 1 failure).
+  #
+  # All per-host values (nodeIndex, localAddress, …) come from local/settings.nix —
+  # that is the ONLY file to edit when cloning to node2/node3.
   networking.ovn = {
     enable = true;
-    role = "central";              # "central" (3 nodes) or "compute"
-    centralNodes = [ "172.16.3.4" ];  # underlay IPs of the central nodes
-    nodeIndex = 0;                 # this host's position in centralNodes
-    localAddress = "172.16.3.4";   # this host's underlay IP (geneve)
+    role = "central";                      # central also runs the local controller
+    centralNodes = settings.centralNodes;  # same three-IP list on every host
+    nodeIndex = settings.nodeIndex;        # ← per-host (local/settings.nix)
+    localAddress = settings.localAddress;  # ← per-host (local/settings.nix)
   };
 
   # Incremental RBD backups to S3-compatible NAS

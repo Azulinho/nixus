@@ -64,9 +64,11 @@ in
       type = lib.types.enum [ "central" "compute" ];
       default = "central";
       description = ''
-        central: run the OVN NB/SB databases and ovn-northd.
-                 Use on the first 3 hosts for a RAFT-quorum control plane.
-        compute: run only OVS + ovn-controller. Use on all other hosts.
+        central: run the OVN NB/SB databases and ovn-northd. Central nodes
+                 ALSO run the local ovn-controller (it is unconditional below),
+                 so every central node is simultaneously a compute/hypervisor
+                 node. Use on the first 3 hosts for a RAFT-quorum control plane.
+        compute: run only OVS + ovn-controller. Use on 4th+ hypervisors.
       '';
     };
 

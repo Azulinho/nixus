@@ -2,6 +2,12 @@
 result
 result-*
 
+# Per-host identity (one line: this host's name — the key into local/settings.nix `hosts`)
+hostname
+
+# Generated hardware scan — must be renamed to <hostname>-hardware-configuration.nix before committing
+local/hardware-configuration.nix
+
 # Age private keys (never commit these)
 secrets/age.key
 /var/lib/sops/

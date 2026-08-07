@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, settings, ... }:
 
 {
   # ============================================================================
@@ -13,13 +13,17 @@
       config = {
         "core.https_address" = ":8443";
         # Cluster traffic: bind to the node's stable underlay IP so members
-        # stable address. Falls back to core.https_address if unset, but
-        # declaring it pins cluster traffic to this binding.
-        # Cluster membership itself is joined imperatively (join tokens are
+        # can reach each other. Per-host values come from local/settings.nix
+        # (localAddress, nodeIndex). A wildcard (:8443) is rejected by Incus
+        # for cluster traffic — a concrete address is required. Cluster
+        # membership itself is joined imperatively (join tokens are
         # single-use) — see README.
-        "cluster.https_address" = "172.16.3.4:8443";
-        # OVN SDN integration (project-scoped networks)
-        "network.ovn.northbound_connection" = "tcp:172.16.3.4:6641";
+        "cluster.https_address" = "${settings.localAddress}:8443";
+        # OVN SDN integration (project-scoped networks). incusd accepts a
+        # single NB remote; we point it at centralNodes[0] (node1) on every
+        # host. OVSDB RAFT redirect covers leader changes while node1 is
+        # reachable — see README.
+        "network.ovn.northbound_connection" = "tcp:${lib.elemAt settings.centralNodes 0}:6641";
         "network.ovn.integration_bridge" = "br-int";
       };
 
