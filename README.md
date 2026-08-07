@@ -1,15 +1,18 @@
 # NixOS Proxmox-like Virtualization Cluster
 
-This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, OVN, ZFS, and Ceph RBD. It is designed to run on a single hypervisor today and scale to a multi-host cluster (3 OVN central + N compute nodes) by cloning the configuration to additional NixOS hosts.
+This repository defines a NixOS configuration that replicates core Proxmox VE features using Incus, OVN, ZFS, and Ceph RBD. It runs a 3-node hypervisor cluster — every node is an OVN central+compute host — and scales to N nodes by cloning the configuration to additional NixOS hosts (see [Scaling to N hosts](#scaling-to-n-hosts)).
 
-## Host
+## Cluster
 
-| Property | Value |
-|----------|-------|
-| Hostname | `nixos` |
-| Uplink | `ens18` → `172.16.3.4/24` |
-| Root pool | `zroot` (127 GB, ZFS) |
-| State version | `26.05` |
+Three hypervisor nodes, each running the identical stack (Incus, OVN central+compute, single-node Ceph on ZFS). Per-host values — hostname, underlay IP, hostId, time zone, uplink NIC — live in `local/settings.nix` and are selected by the gitignored `/etc/nixos/hostname` file (see [Multi-Host Networking (OVN)](#multi-host-networking-ovn)).
+
+| Host | Underlay IP | OVN role |
+|------|-------------|----------|
+| node1 | 172.16.3.4 | central + compute |
+| node2 | 172.16.3.5 | central + compute |
+| node3 | 172.16.3.6 | central + compute |
+
+Root pool: `zroot` (127 GB, ZFS, encrypted) on every node. State version `26.05`.
 
 ---
 
@@ -57,8 +60,10 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 └─────────────────────────────────────────┘
 ```
 
+> The diagram shows one node's stack — node2 and node3 run the identical layout (their own underlay IPs).
+
 - **Incus** provides KVM virtual machines, Linux containers (LXC), and a web-based management UI.
-- **OVN** provides the multi-host SDN fabric: project-scoped logical networks with DHCP/NAT, replacing the old FRR+EVPN overlay.
+- **OVN** provides the multi-host SDN fabric: project-scoped logical networks with DHCP/NAT, routed between hosts over geneve tunnels.
 - **ZFS** is the encrypted host filesystem (`aes-256-gcm`). It holds the OS datasets, the swap zvol (`zroot/swap`), and the `zroot/ceph-osd0` zvol that backs the Ceph OSD. It does **not** store VM/LXC data — Incus uses Ceph RBD exclusively for that. ZFS auto-snapshots protect host state only.
 - **Ceph RBD** provides distributed block storage via a single-node Ceph cluster (MON, MGR, OSD on a 20G ZFS zvol). **All Incus instances (VMs and LXC) store their root disks here.**
 - **nftables** provides IPv4/IPv6 firewalling for the host.
@@ -89,7 +94,7 @@ This repository defines a NixOS configuration that replicates core Proxmox VE fe
 |------|--------|---------|---------|
 | `ceph` | Ceph RBD | `zroot/ceph-osd0` (Ceph OSD) | Distributed block storage; images clone from base layer |
 
-Created automatically by Incus preseed on first boot or rebuild. The default profile uses this pool. The legacy ZFS pool has been removed.
+Created automatically by Incus preseed on first boot or rebuild. The default profile uses this pool.
 
 ### Networks
 | Name | Type | Subnet | NAT | Purpose |
@@ -196,17 +201,7 @@ For **VM/container files**, restore the RBD image from S3 (see the [RBD restore 
 
 ## Multi-Host Networking (OVN)
 
-OVN (Open Virtual Network) is the SDN layer for this fabric. It replaces the earlier FRR + BGP/EVPN overlay — which has been **removed** — because OVN provides everything EVPN did plus project-scoped logical networks, DHCP/NAT, and tenant self-service.
-
-### Why OVN over FRR+EVPN
-
-| Capability | FRR+EVPN (removed) | OVN |
-|-----------|-------------------|-----|
-| Cross-host L2 | VXLAN + BGP EVPN | Geneve tunnels (on-demand) |
-| Tenant isolation | VNI per segment | Logical switch per project |
-| DHCP / NAT | Not built in | Built in |
-| Tenant self-service | Admin provisions bridges | `incus network create --type=ovn` |
-| Control plane | BGP (peer management) | OVN NB/SB databases (RAFT) |
+OVN (Open Virtual Network) is the SDN layer for this fabric: project-scoped logical networks with DHCP/NAT and tenant self-service, carried between hosts over geneve tunnels.
 
 ### Components
 
@@ -256,8 +251,9 @@ node1
 are all derived from `settings`, so cloning a host is: copy the repo → create
 `/etc/nixos/hostname` with the host's name (its entry is already in
 `settings.nix`) → generate and commit `local/<hostname>-hardware-configuration.nix`
-(`nixos-generate-config --dir /etc/nixos/local && mv …`) → re-encrypt
-`secrets/secrets.yaml` for the new host's age key.
+(`nixos-generate-config --dir /etc/nixos/local && mv …`) → add the new host's age
+public key to `.sops.yaml` and run `sops updatekeys secrets/secrets.yaml` (see
+[Secrets (sops-nix)](#setup-sops-nix)).
 
 ### Scaling to N hosts
 
@@ -342,8 +338,9 @@ in the `hosts` dictionary of `local/settings.nix`. Its hardware layout is a
 committed per-host file too: generate it with `nixos-generate-config --dir
 /etc/nixos/local` and commit it as `local/node2-hardware-configuration.nix`
 (configuration.nix imports `local/<hostname>-hardware-configuration.nix`
-automatically). (Plus re-encrypt `secrets/secrets.yaml` for the new host's age
-key — see [Secrets (sops-nix)](#setup-sops-nix).) `cluster.https_address` and
+automatically). (Plus add the new host's age public key to `.sops.yaml` and run
+`sops updatekeys secrets/secrets.yaml` — see
+[Secrets (sops-nix)](#setup-sops-nix).) `cluster.https_address` and
 the OVN NB remote are derived from `settings`, so nothing in the modules needs
 editing. Wildcard addresses (`:8443`) are rejected by Incus for cluster traffic
 — a concrete address is required.
@@ -363,7 +360,7 @@ So: declarative pins the stable endpoint, imperative performs the one-time join.
 ### Bootstrap procedure
 
 ```bash
-# Node 1 (seed) — upgrade the already-initialized server to a cluster:
+# Node 1 (seed) — initialize the cluster:
 incus admin init          # answer "cluster? yes", give this node a name
 
 # On node 1 — generate a join token for the new member:
@@ -609,10 +606,6 @@ incus config set $TENANT-router limits.memory=1GiB --project $TENANT
 #   Configure as a standard Linux router with your choice of tooling
 ```
 
-### Advanced variation: OVS-based SDN container
-
-For power users who need OpenFlow, traffic mirroring, or custom tunneling, see the discussion in the code comments. This requires a **privileged container** with `security.nesting=true` and `security.syscalls.intercept.mknod=true` so the tenant can run Open vSwitch inside their project.
-
 ---
 
 ## Ceph RBD
@@ -707,6 +700,22 @@ sops secrets/secrets.yaml
 > ln -s /var/lib/sops/age.key ~/.config/sops/age/keys.txt
 > ```
 Replace the placeholder values under `rbdBackupS3Env` with your real NAS credentials, then save and exit.
+
+**2. Adding a new host (multi-key group):**
+
+The file is encrypted to **all** hosts at once — one committed `secrets.yaml`, no
+per-host copies. The key holders are listed in `.sops.yaml` (each host's age
+public key, generated with `age-keygen -y /var/lib/sops/age.key`):
+
+```bash
+# 1. On the new host, get its age public key:
+age-keygen -y /var/lib/sops/age.key
+# 2. Add it to .sops.yaml (keys: + creation_rules key group), then re-encrypt:
+sops updatekeys secrets/secrets.yaml
+```
+
+`sops updatekeys` re-encrypts the file for every listed key — existing hosts keep
+working, the new host can now decrypt the same file with its own private key.
 
 The file should look like this (sops will encrypt it on save):
 
@@ -811,7 +820,6 @@ sudo systemctl status ovn-northd ovn-controller
 
 Items tracked in `/root/desired.txt` that are not yet implemented:
 - QinQ (double-tagged VLANs)
-- OVN multi-central-node RAFT cluster (module supports it; needs 3 hosts to activate)
 - Incus control-plane clustering (config prepared; join not yet performed — see [Incus Clustering](#incus-clustering-multi-host-control-plane))
 - Distributed firewall via OVN ACLs (native, per-project)
 - Automated single-file restore from remote ZFS snapshots
