@@ -46,6 +46,9 @@
             "ipv4.nat" = "true";
             "ipv6.address" = "fd42:100::1/64";
             "ipv6.nat" = "true";
+            # Serve per-project instance records (written by the
+            # incus-dns-refresh timer) through the fabric dnsmasq.
+            "raw.dnsmasq" = "addn-hosts=/run/incus-dns/hosts.d";
           };
         }
       ];

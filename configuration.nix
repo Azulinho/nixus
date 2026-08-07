@@ -24,6 +24,7 @@ in
       ./modules/ceph.nix
       ./modules/rbd-backup.nix
       ./modules/ovn.nix
+      ./modules/incus-dns.nix
     ];
 
   # Use the systemd-boot EFI boot loader.
@@ -124,6 +125,13 @@ in
 
   # Enable the OpenSSH daemon.
   services.openssh.enable = true;
+
+  # Per-project DNS for Incus: serves <instance>.<project>.incus-cluster1.mydomain
+  # through the uplink dnsmasq (see modules/incus-dns.nix).
+  services.incusDns = {
+    enable = true;
+    zone = "incus-cluster1.mydomain";
+  };
 
   # Swap on ZFS zvol
   swapDevices = [

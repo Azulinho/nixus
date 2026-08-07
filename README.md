@@ -349,6 +349,69 @@ incus cluster list
 
 ---
 
+## DNS & Name Resolution
+
+DNS in this stack is deliberately **one resolver for the whole fabric**: Incus hands every network (bridge *and* OVN) DHCP option 6 = the uplink gateway `10.0.100.1`, where the uplink dnsmasq answers. It recurses via `systemd-resolved` (127.0.0.53) to the LAN router `172.16.3.1`.
+
+### Layers
+
+| Layer | What it does |
+|-------|--------------|
+| LAN router `172.16.3.1` | upstream recursion for the host (DHCP-assigned) |
+| `systemd-resolved` | host resolver, stub at `127.0.0.53`; public fallbacks |
+| uplink dnsmasq on `incusbr0` (`10.0.100.1:53`) | the resolver every instance points at: `.incus` domain, `_gateway.incus`, per-project records (`addn-hosts`), recursion upstream |
+| OVN DHCP (ovn-northd) | hands out IP + **option 6** (nameserver `10.0.100.1`) + **option 15** (search domain, from `dns.search`) per network |
+
+### Firewall requirement (important for new hosts)
+
+The NixOS firewall must accept DNS/DHCP arriving on `incusbr0`, otherwise container queries are dropped at INPUT before reaching dnsmasq (host-generated queries bypass INPUT, which is why this was invisible). Configured in `modules/networking.nix`:
+
+```nix
+interfaces.incusbr0 = {
+  allowedTCPPorts = [ 53 ];
+  allowedUDPPorts = [ 53 67 547 ];
+};
+```
+
+Without it: OVN/bridge instances cannot resolve anything (timeout), and bridge instances never get a DHCPv4 lease.
+
+### Per-project DNS (`vm1.project1.incus-cluster1.mydomain`)
+
+Incus 7.0.1 does **not** generate name→IP records for OVN instances (`dns.zone` is rejected on OVN networks; `dns.mode` is inert with the dnsmasq backend). `modules/incus-dns.nix` closes that gap:
+
+- `services.incusDns.enable` + `services.incusDns.zone` (e.g. `incus-cluster1.mydomain`) — enabled in `configuration.nix`
+- `raw.dnsmasq = "addn-hosts=/run/incus-dns/hosts.d"` on `incusbr0` (preseed) hooks a hosts dir into the uplink dnsmasq
+- `incus-dns-refresh.timer` (every 60 s) reads `incus list` per project and writes `IP <name>.<project>.<zone> <name>` per project, then SIGHUPs dnsmasq
+
+Records are auto-discovered for **all** projects — no per-project config. Cross-project resolution works automatically (one resolver holds every project's zone).
+
+Usage — per project, when creating its OVN network:
+
+```bash
+incus project create project1 --config features.networks=true
+incus network create project1-net --type=ovn --project project1
+incus network set project1-net dns.search=project1.incus-cluster1.mydomain --project project1
+incus launch images:alpine/edge vm1 --project project1 --network project1-net
+```
+
+Then inside any project1 instance:
+
+```bash
+nslookup vm2.project1.incus-cluster1.mydomain   # FQDN
+nslookup vm2                                    # short name (search domain)
+```
+
+Both resolve; external names still recurse upstream. Verified live against 7.0.1.
+
+### Known limits
+
+- **`dns.zone` unsupported on OVN** in 7.0.1 — records must come from `incus-dns-refresh` (above)
+- **Search domain is per network**, not per project — set it when creating each OVN network
+- **No per-project DNS isolation** — the fabric resolver holds all projects' zones. True isolation would need per-project DNS servers plus per-network DHCP option 6 overrides, which 7.0.1 does not expose declaratively
+- **Refresh lag** — records update within the 60 s timer tick (instant updates via `incus monitor` lifecycle events are a possible future upgrade)
+
+---
+
 ## Tenant Self-Managed Virtual Networks
 
 Tenants have two paths to self-managed networking:
