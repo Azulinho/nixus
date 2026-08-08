@@ -150,6 +150,7 @@ in
      pi-coding-agent
      opencode
      git
+     gnumake
      tmux
      sops
      age
