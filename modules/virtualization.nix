@@ -20,8 +20,8 @@
         # single-use) — see README.
         "cluster.https_address" = "${settings.localAddress}:8443";
         # OVN SDN integration (project-scoped networks). incusd accepts a
-        # single NB remote; we point it at centralNodes[0] (node1) on every
-        # host. OVSDB RAFT redirect covers leader changes while node1 is
+        # single NB remote; we point it at centralNodes[0] (z3-nix01) on every
+        # host. OVSDB RAFT redirect covers leader changes while z3-nix01 is
         # reachable — see README.
         "network.ovn.northbound_connection" = "tcp:${lib.elemAt settings.centralNodes 0}:6641";
         "network.ovn.integration_bridge" = "br-int";

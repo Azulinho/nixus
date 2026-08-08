@@ -9,7 +9,7 @@ let
   settingsAll = import ./local/settings.nix;
 
   # This host's name: the key into `settingsAll.hosts`. The file
-  # /etc/nixos/hostname is a single line ("node1", "node2", …) and is
+  # /etc/nixos/hostname is a single line ("z3-nix01", "node2", …) and is
   # gitignored so each host carries its own copy in the same repo.
   hostName =
     if builtins.pathExists ./hostname then
@@ -17,7 +17,7 @@ let
     else
       throw ''
         Missing /etc/nixos/hostname — create it with this host's name, e.g.:
-          echo node1 > /etc/nixos/hostname
+          echo z3-nix01 > /etc/nixos/hostname
         Known hosts (keys of `hosts` in local/settings.nix):
           ${builtins.concatStringsSep " " (builtins.attrNames settingsAll.hosts)}
       '';
@@ -194,7 +194,9 @@ in
     localAddress = settings.localAddress;  # ← per-host (local/settings.nix)
   };
 
-  # Incremental RBD backups to S3-compatible NAS
+  # Incremental RBD backups to S3-compatible NAS.
+  # designatedHost: only z3-nix01 runs the backup — the RBD pool is shared by
+  # the whole cluster, so running it on every node would triple the uploads.
   services.rbdBackup = {
     enable = true;
     pool = "rbd";
@@ -205,12 +207,17 @@ in
     retentionDays = 30;
     compress = true;
     credentialsFile = config.sops.secrets.rbdBackupS3Env.path;
+    designatedHost = "z3-nix01";
   };
 
   # Secrets management via sops-nix
   sops.defaultSopsFile = ./secrets/secrets.yaml;
   sops.age.keyFile = "/var/lib/sops/age.key";
   sops.secrets.rbdBackupS3Env = {};
+  # Shared Ceph cluster keyrings (one cluster across all nodes) — generated
+  # once by scripts/ceph-init-keys.sh on the first node, then distributed here.
+  sops.secrets.cephClientAdminKeyring = {};
+  sops.secrets.cephMonKeyring = {};
 
   # Enable modern Nix CLI (flakes + nix-command)
   nix.settings.experimental-features = [ "nix-command" "flakes" ];

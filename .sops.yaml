@@ -8,7 +8,7 @@
 # then re-encrypt the secrets file for all holders:
 #   sops updatekeys secrets/secrets.yaml
 keys:
-  - &node1_age age19fxu6v8aj3emj0dnyhama3qtc0g2a2rmngf77at8gyp7v7afa5fszwjcn3
+  - &z3-nix01_age age19fxu6v8aj3emj0dnyhama3qtc0g2a2rmngf77at8gyp7v7afa5fszwjcn3
   # TODO: uncomment as each node comes online (fill in its age pubkey):
   # - &node2_age age1...
   # - &node3_age age1...
@@ -17,6 +17,6 @@ creation_rules:
   - path_regex: secrets/.*\.yaml$
     key_groups:
       - age:
-          - *node1_age
+          - *z3-nix01_age
           # - *node2_age
           # - *node3_age

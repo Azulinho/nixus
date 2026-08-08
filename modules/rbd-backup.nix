@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, settings, ... }:
 
 let
   cfg = config.services.rbdBackup;
@@ -77,9 +77,19 @@ in
         Default matches Incus instance volumes and cached base images.
       '';
     };
+
+    designatedHost = lib.mkOption {
+      type = lib.types.str;
+      default = "z3-nix01";
+      description = ''
+        Host that runs the backup timer. With a shared Ceph cluster the RBD
+        pool is the same everywhere, so exactly ONE node may run the backup
+        (running it on every node would upload identical backups repeatedly).
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf (cfg.enable && settings.hostName == cfg.designatedHost) {
     environment.systemPackages = [ pkgs.rclone ];
 
     systemd.services.rbd-backup = {
@@ -90,6 +100,13 @@ in
         Type = "oneshot";
         ExecStart = pkgs.writeShellScript "rbd-backup" ''
           set -euo pipefail
+
+          # Designated-runner guard (belt and braces alongside the mkIf above):
+          # only the designated host may run backups against the shared pool.
+          [ "$(cat /proc/sys/kernel/hostname)" = "${cfg.designatedHost}" ] || {
+            echo "Not the designated RBD backup host (${cfg.designatedHost}); skipping."
+            exit 0
+          }
 
           POOL="${cfg.pool}"
           REMOTE="${cfg.rcloneRemote}"

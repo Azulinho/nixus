@@ -66,7 +66,7 @@ The three commands you will use most often, and where each subsystem lives:
 
 A 3-node hypervisor cluster that replicates the core features of Proxmox VE on
 NixOS. Every node runs the identical software stack — Incus, OVN (central +
-compute), and a single-node Ceph cluster on ZFS — so the configuration is
+compute), and a shared, cluster-capable Ceph cluster on ZFS — so the configuration is
 declarative and reproducible. The cluster scales to N nodes by cloning the
 repository and adding an entry to `local/settings.nix`
 (see [Scaling to N hosts](#91-adding-a-host-scaling-to-n)).
@@ -79,7 +79,7 @@ in `local/settings.nix` and are selected by the gitignored
 
 | Host | Underlay IP | OVN role | Note |
 |------|-------------|----------|------|
-| node1 | 172.16.3.4 | central + compute | seeded first; `nodeIndex = 0` |
+| z3-nix01 | 172.16.3.4 | central + compute | seeded first; `nodeIndex = 0` |
 | node2 | 172.16.3.5 | central + compute | `nodeIndex = 1` |
 | node3 | 172.16.3.6 | central + compute | `nodeIndex = 2` |
 
@@ -90,7 +90,7 @@ Root pool: `zroot` (127 GB, ZFS, encrypted) on every node. NixOS state version
 
 ```
 ┌─────────────────────────────────────────────┐
-│              NixOS Host (node1)             │
+│              NixOS Host (z3-nix01)           │
 │  ┌───────────────────────────────────────┐  │
 │  │               Incus                   │  │
 │  │   ├─ KVM VMs        Web UI :8443      │  │
@@ -115,7 +115,7 @@ Root pool: `zroot` (127 GB, ZFS, encrypted) on every node. NixOS state version
 │    └──────────────────────────────────────┘  │
 │                                              │
 │    ┌──────────────────────────────────────┐  │
-│    │   Ceph RBD (single-node)             │  │
+│    │   Ceph RBD (shared cluster)            │  │
 │    │   ├─ MON + MGR + OSD                │  │
 │    │   └─ OSD backed by zroot/ceph-osd0   │  │
 │    └──────────────────────────────────────┘  │
@@ -132,7 +132,7 @@ node2 and node3 run the identical layout (their own underlay IPs).
 | **Incus** | KVM VMs, LXC containers, web UI (`:8443`); preseeded declaratively |
 | **OVN** | Multi-host SDN: project-scoped logical networks with DHCP/NAT, carried between hosts over geneve tunnels |
 | **ZFS** | Encrypted host filesystem (`aes-256-gcm`): OS datasets, swap zvol, the `zroot/ceph-osd0` zvol that backs the Ceph OSD. **Does not** store instance data |
-| **Ceph RBD** | Distributed block storage (single-node MON/MGR/OSD on a 20 G ZFS zvol). **Every Incus instance root disk lives here** |
+| **Ceph RBD** | Distributed block storage (one MON/MGR/OSD per node, single shared cluster, 20 G ZFS zvol each). **Every Incus instance root disk lives here** |
 | **nftables** | IPv4/IPv6 host firewall |
 
 ### 2.4 Services & ports
@@ -141,6 +141,7 @@ node2 and node3 run the identical layout (their own underlay IPs).
 |------|-------|---------|---------|
 | 22 | TCP | SSH | all nodes |
 | 8443 | TCP | Incus API / Web UI | all nodes |
+| 3300, 6789 | TCP | Ceph msgr2 / msgr1 (clients + cluster) | all nodes |
 | 6641 | TCP | OVN northbound DB (clients: incusd, ovn-northd, ovn-controller) | central nodes |
 | 6642 | TCP | OVN southbound DB (clients: ovn-controller) | central nodes |
 | 6643 | TCP | OVN NB RAFT (between centrals) | central nodes |
@@ -153,7 +154,7 @@ Systemd units you will see on every node (see the [service inventory](#156-servi
 - `incus.service`, `incus-preseed.service`, `incus-dns-refresh.timer`
 - `ovsdb.service` / `ovs-vswitchd` (Open vSwitch base)
 - `ovn-nb-db`, `ovn-sb-db`, `ovn-northd`, `ovn-controller` (central role)
-- `ceph-mon-a`, `ceph-mgr-a`, `ceph-osd-0` + bootstrap one-shots
+- `ceph-mon-<id>`, `ceph-mgr-<id>`, `ceph-osd-<id>` (per node: a/0, b/1, c/2) + bootstrap one-shots
 - `rbd-backup.service` / `rbd-backup.timer` (nightly, 02:00)
 - `zfs-snapshot-{frequent,hourly,daily,weekly,monthly}.timer`
 - `systemd-networkd`, `sshd`, `nftables`
@@ -167,18 +168,19 @@ Systemd units you will see on every node (see the [service inventory](#156-servi
 | File | Purpose |
 |------|---------|
 | `configuration.nix` | Top-level configuration; imports all modules, hardware scan, sops-nix, and derives per-host `settings` |
-| `local/settings.nix` | **Per-host values as a `hosts` dictionary** (hostId, IPs, nodeIndex, timeZone, uplink NIC…) plus cluster-wide keys (`centralNodes`, `dnsZone`, `cephFsid`). Committed once, serves all hosts |
-| `/etc/nixos/hostname` (gitignored) | One line: this host's name (e.g. `node1`) — selects the `hosts.<name>` entry |
+| `local/settings.nix` | **Per-host values as a `hosts` dictionary** (hostId, IPs, nodeIndex, timeZone, uplink NIC…) plus cluster-wide keys (`centralNodes`, `cephNodes`, `dnsZone`, `cephFsid`). Committed once, serves all hosts |
+| `/etc/nixos/hostname` (gitignored) | One line: this host's name (e.g. `z3-nix01`) — selects the `hosts.<name>` entry |
 | `local/<hostname>-hardware-configuration.nix` | Per-host hardware scan (`nixos-generate-config` output, do not edit by hand) — one file per node, all committed |
 | `modules/virtualization.nix` | Incus (KVM + LXC + UI), preseed (pools, networks, profiles), kernel sysctls for forwarding, KSM |
 | `modules/networking.nix` | systemd-networkd, VLAN/bond support, nftables firewall incl. OVN ports and DNS/DHCP on `incusbr0` |
 | `modules/ovn.nix` | OVN SDN: NB/SB databases, ovn-northd, ovn-controller (central/compute roles, RAFT bootstrapping) |
-| `modules/ceph.nix` | Single-node Ceph cluster (MON+MGR+OSD) with RBD pool on ZFS zvol, 3-phase bootstrap |
+| `modules/ceph.nix` | Shared Ceph cluster (MON+MGR+OSD per node) with RBD pool on ZFS zvols; 3-phase bootstrap/join; auto-tunes replication to topology |
+| `scripts/ceph-init-keys.sh` | One-time generator for the shared Ceph keyrings (encrypts into sops) |
 | `modules/rbd-backup.nix` | Incremental RBD backups to S3 via rclone (nightly timer, retention) |
 | `modules/incus-dns.nix` | Per-project instance DNS records through the uplink dnsmasq |
 | `modules/backup.nix` | ZFS auto-snapshots, syncoid remote replication (disabled by default) |
 | `modules/users.nix` | Admin user with `incus-admin`, `wheel` groups |
-| `.sops.yaml` / `secrets/secrets.yaml` | sops-nix key holders / encrypted secrets (S3 credentials) |
+| `.sops.yaml` / `secrets/secrets.yaml` | sops-nix key holders / encrypted secrets (S3 credentials, Ceph keyrings) |
 | `.gitignore` | Excludes `result`, `hostname`, hardware scans before rename, age keys |
 
 ### 3.2 Per-host settings
@@ -193,7 +195,7 @@ argument:
 # local/settings.nix — committed once, serves all hosts
 {
   hosts = {
-    node1 = { hostId = "01234567"; localAddress = "172.16.3.4"; nodeIndex = 0;
+    z3-nix01 = { hostId = "01234567"; localAddress = "172.16.3.4"; nodeIndex = 0;
               uplinkInterface = "ens18"; timeZone = "Europe/London"; };
     node2 = { hostId = "…"; localAddress = "172.16.3.5"; nodeIndex = 1;
               uplinkInterface = "ens18"; timeZone = "Europe/London"; };
@@ -201,15 +203,16 @@ argument:
               uplinkInterface = "ens18"; timeZone = "Europe/London"; };
   };
   centralNodes = [ "172.16.3.4" "172.16.3.5" "172.16.3.6" ];  # SAME on every host
+  cephNodes    = [ "172.16.3.4" "172.16.3.5" "172.16.3.6" ];  # Ceph mon IPs (one mon per node)
   dnsZone = "incus-cluster1.mydomain";                        # fabric DNS zone
   cephFsid = "ede5176c-2777-4e6d-9cf1-529d4dfe0057";          # Ceph cluster identity
 }
 
 # /etc/nixos/hostname  (gitignored, one line per machine)
-node1
+z3-nix01
 ```
 
-`cluster.https_address`, the Ceph `monIp` and
+`cluster.https_address`, the Ceph mon list (`cephNodes`) and
 `network.ovn.northbound_connection` are all derived from `settings`, so cloning
 a host is just: copy the repo → create `/etc/nixos/hostname` with the host's
 name → generate and commit `local/<hostname>-hardware-configuration.nix` →
@@ -317,14 +320,17 @@ There are **two storage domains** — do not confuse them:
 
 ### 4.2 Ceph RBD
 
-Single-node Ceph cluster per host, created automatically by the bootstrap
-one-shots in `modules/ceph.nix`.
+**One shared Ceph cluster** for the whole Incus fleet, built by the same
+module on every node: each host runs its own MON/MGR/OSD (`mon a/b/c`,
+`osd 0/1/2`) against the same cluster — same fsid, same monmap, same
+keyrings (see below). It works as a single node today and grows to 3 nodes
+by simply deploying the same config to the other hosts; no cluster rebuild.
 
 | Daemon | Purpose |
 |--------|---------|
-| `ceph-mon-a` | Cluster monitor and quorum |
-| `ceph-mgr-a` | Manager (dashboard, metrics) |
-| `ceph-osd-0` | Object storage daemon on the `zroot/ceph-osd0` zvol |
+| `ceph-mon-<a/b/c>` | Monitor + quorum (1 per node) |
+| `ceph-mgr-<a/b/c>` | Manager (dashboard, metrics) |
+| `ceph-osd-<0/1/2>` | OSD on that node's `zroot/ceph-osd0` zvol |
 
 | Pool | Application | PGs | Purpose |
 |------|-------------|-----|---------|
@@ -347,15 +353,34 @@ incus storage show ceph
 sudo rbd ls --pool rbd | grep container_my-ct
 ```
 
-**Single-node tuning (in `modules/ceph.nix`):**
-- `osd_pool_default_size = 1` and `osd_pool_default_min_size = 1` (no replication)
-- Crush rule modified to use `type osd` instead of `type host`
-- `mon_warn_on_pool_no_redundancy = false`
+**Keyrings — generated once, shared via sops.** All nodes authenticate with
+the same admin + mon keyrings (encrypted in `secrets/secrets.yaml`). First
+deploy on z3-nix01:
 
-> **Caveat:** this is a single-node cluster — a host failure takes its
-> instances with it (control-plane HA from OVN/Incus clustering does **not**
-> make storage HA). Do not store critical data without adding ≥3 OSDs and
-> enabling replication. See [§12.5](#125-ceph).
+```bash
+sudo scripts/ceph-init-keys.sh             # generate + sops-encrypt the keyrings
+git add secrets/secrets.yaml && git commit # distribute to the repo
+sudo nixos-rebuild switch
+```
+
+When node2/node3 come online: add their age keys to `.sops.yaml`, run
+`sops updatekeys secrets/secrets.yaml`, then deploy the same repo there.
+Their phase1 bootstrap detects the live cluster and **joins** it (fetches
+the monmap, adds itself, mkfs with the shared mon keyring) instead of
+creating a new one.
+
+**Automatic topology tuning (phase3, re-evaluated on every boot):**
+- **1 OSD host** → single-node mode: `osd_pool_default_size = 1` (no
+  replication), CRUSH rule uses `type osd`, no-redundancy warning off.
+- **≥2 OSD hosts** → replicated mode: `rbd` pool `size 3` / `min_size 2`,
+  CRUSH rule restored to `type host`, no-redundancy warning on. With exactly
+  2 OSDs the pool is degraded but writable; it reaches `active+clean` when
+  the third OSD lands.
+
+> **Caveat:** until nodes 2/3 are deployed this is effectively a single-node
+> cluster — a host failure takes its instances with it. Control-plane HA from
+> OVN/Incus clustering does **not** make storage HA. See [§12.5](#125-ceph)
+> for the growth recipe.
 
 ---
 
@@ -450,7 +475,7 @@ tunnels.
   failure). With 1 node the DBs run standalone (no HA).
 - **`compute`** — runs only OVS + `ovn-controller`. Use for 4th+ hypervisors.
 
-**This cluster: node1..3 are all `central`** — every node is both a
+**This cluster: z3-nix01, node2 and node3 are all `central`** — every node is both a
 control-plane member and a hypervisor. All nodes use the same `centralNodes`
 list; compute nodes connect their `ovn-controller` to the SB DBs
 (`tcp:<central>:6642`).
@@ -623,6 +648,12 @@ A systemd timer runs daily at **02:00** to back up all RBD images incrementally
 to an S3-compatible NAS via `rclone`. **No data is written to local disk** —
 the stream flows directly Ceph → zstd → S3 upload.
 
+> **Designated runner.** `services.rbdBackup.designatedHost` (default
+> `z3-nix01`) decides which node runs the backup. The RBD pool is shared by the
+> whole cluster, so a timer on every node would upload identical backups
+> repeatedly. The service and timer are only *defined* on the designated host
+> (the script also guards at runtime).
+
 1. **First run:** `rbd export -` (stdout) → `zstd -19 -c` → `rclone rcat`
    uploads full image to S3.
 2. **Subsequent runs:** `rbd export-diff --from-snap <last> -` → `zstd -19 -c`
@@ -747,7 +778,7 @@ mount/`qemu-nbd` it locally.
 
 | Host | Setup |
 |------|-------|
-| node1 (172.16.3.4) | `/etc/nixos/hostname` → `node1` (entry: `localAddress = "172.16.3.4"`, `nodeIndex = 0`) |
+| z3-nix01 (172.16.3.4) | `/etc/nixos/hostname` → `z3-nix01` (entry: `localAddress = "172.16.3.4"`, `nodeIndex = 0`) |
 | node2 (172.16.3.5) | `/etc/nixos/hostname` → `node2` (entry: `localAddress = "172.16.3.5"`, `nodeIndex = 1`) |
 | node3 (172.16.3.6) | `/etc/nixos/hostname` → `node3` (entry: `localAddress = "172.16.3.6"`, `nodeIndex = 2`) |
 | Compute 4..N | add a `hosts.<name>` entry in `local/settings.nix`, set `role = "compute"` in `configuration.nix` |
@@ -786,7 +817,7 @@ Clustering spans three independent layers that must all be in place:
 | Layer | Mechanism | Status |
 |-------|-----------|--------|
 | Control plane | Incus embedded dqlite DB replicated via RAFT | Configured (`cluster.https_address`); join is imperative |
-| Storage | Ceph RBD pool shared across members | Ready (`ceph` pool in preseed) — but single-node Ceph = no storage HA |
+| Storage | Ceph RBD pool shared across members | Ready (`ceph` pool in preseed); shared cluster — add nodes 2/3 for storage HA |
 | Networking | OVN logical networks (cluster-wide) | Ready — see [§5.4](#54-ovn-sdn-fabric) |
 
 **What's already declared in the config** (identical on every member — no
@@ -797,7 +828,7 @@ per-node edits):
 preseed.config = {
   "core.https_address" = ":8443";
   "cluster.https_address" = "${settings.localAddress}:8443";      # per-host
-  "network.ovn.northbound_connection" = "tcp:${lib.elemAt settings.centralNodes 0}:6641";  # node1 (single NB remote)
+  "network.ovn.northbound_connection" = "tcp:${lib.elemAt settings.centralNodes 0}:6641";  # z3-nix01 (single NB remote)
   "network.ovn.integration_bridge" = "br-int";
 };
 ```
@@ -822,10 +853,10 @@ So: declarative pins the stable endpoint, imperative performs the one-time join.
 **Bootstrap procedure:**
 
 ```bash
-# Node 1 (seed) — initialize the cluster:
-incus admin init          # answer "cluster? yes", give this node a name
+# z3-nix01 (seed) — initialize the cluster:
+incus admin init          # answer "cluster? yes"; name this member "z3-nix01" (defaults to hostname)
 
-# On node 1 — generate a join token for the new member:
+# On z3-nix01 — generate a join token for the new member:
 incus cluster add node2   # prints one-time token
 
 # On node 2 — paste the token (answers member_config questions interactively):
@@ -849,9 +880,10 @@ incus cluster list
   networks like `incusbr0` are **per-member** (each host keeps its own L2).
 - **Minimum 3 members for HA.** Incus uses RAFT for its internal DB; with 3
   members it tolerates 1 failure. 2 members gives no quorum under failure.
-- **Storage HA requires a real Ceph cluster.** Clustering Incus on the current
-  single-node Ceph gives control-plane HA only — RBD images still live on one
-  host. Add ≥3 OSDs with replication before trusting critical workloads.
+- **Storage HA requires a replicated Ceph cluster.** Until node2/node3 are
+  deployed the Ceph pool is size 1 — control-plane HA only, RBD images still
+  live on one host. Deploy the other nodes (see §4.2) to get replicated
+  storage before trusting critical workloads.
 - **Instance placement.** With shared RBD + OVN networks, `incus move` /
   `incus cluster group` relocate instances between members; OVN networks follow
   the instance automatically (no per-host wiring).
@@ -1056,12 +1088,12 @@ A minimal operating rhythm for the cluster (adjust cadence to taste):
   (`ovsdb-tool create`), and the pre-start script only bootstraps when
   `/var/lib/ovn/ovnnb.db` / `ovnsb.db` don't exist — editing `centralNodes`
   alone will **not** re-cluster them. To convert: stop OVN on all three hosts,
-  delete both DB files on **all** hosts, then boot **node1 first** (runs
+  delete both DB files on **all** hosts, then boot **z3-nix01 first** (runs
   `create-cluster`), then node2, then node3 (each runs `join-cluster`
   automatically).
 - **Incus ↔ OVN NB is a single remote.** `network.ovn.northbound_connection`
-  takes one address (node1). OVSDB RAFT redirect covers leader changes while
-  node1 is reachable, but if node1 is fully down, incusd's OVN integration has
+  takes one address (z3-nix01). OVSDB RAFT redirect covers leader changes while
+  z3-nix01 is reachable, but if z3-nix01 is fully down, incusd's OVN integration has
   no NB connection until it returns. (`ovn-northd`/`ovn-controller` are
   unaffected — they use the full comma-separated remote list.)
 - **Bridge networks keep the same subnet on every member.** Incus does **not**
@@ -1092,8 +1124,9 @@ A minimal operating rhythm for the cluster (adjust cadence to taste):
   networks like `incusbr0` are **per-member**.
 - **Minimum 3 members for HA.** Incus uses RAFT for its internal DB; with 3
   members it tolerates 1 failure. 2 members gives no quorum under failure.
-- **Storage HA requires a real Ceph cluster.** Clustering Incus on the current
-  single-node Ceph gives control-plane HA only.
+- **Storage HA requires a replicated Ceph cluster.** Until node2/node3 are
+  deployed the Ceph pool is size 1 — control-plane HA only. Deploy the other
+  nodes (§4.2) for replicated storage.
 
 ### 12.3 DNS
 
@@ -1113,15 +1146,21 @@ A minimal operating rhythm for the cluster (adjust cadence to taste):
 
 ### 12.5 Ceph
 
-- Single-node cluster: `ceph -s` should show HEALTH_OK; if it shows
-  `MON_DOWN`/`OSD_DOWN`, check `systemctl status ceph-mon-a ceph-osd-0` and the
-  zvol: `zfs list zroot/ceph-osd0`.
-- The bootstrap one-shots (`ceph-bootstrap-phase1/2/pool`) run once and write
-  sentinel files under `/var/lib/ceph/`; if a phase failed midway, remove the
-  offending sentinel (`.phaseN-done`) after fixing the cause, then
-  `systemctl restart ceph-bootstrap-phaseN.service`.
-- **No redundancy.** `osd_pool_default_size = 1` — a lost OSD is data loss.
-  Expand before trusting critical workloads.
+- `ceph -s` should show `HEALTH_OK`. HEALTH_WARN `PG_DEGRADED` during the
+  2-node transition is expected until the third OSD lands.
+- If `MON_DOWN`/`OSD_DOWN`: `systemctl status ceph-mon-<id> ceph-osd-<id>`
+  and the zvol: `zfs list zroot/ceph-osd0`.
+- Bootstrap one-shots: phase1/phase2 are idempotent (sentinel files under
+  `/var/lib/ceph/`, removed only if a phase failed midway —
+  `systemctl restart ceph-bootstrap-phaseN.service` after fixing the cause).
+  phase3 re-runs **every boot** to converge CRUSH + replication with the
+  current topology — that's how growth needs no manual steps.
+- **Grow 1 → 3 nodes:** deploy this repo on node2/node3 (same config, own
+  `hostname` file). Their mons join (`a b c`), their OSDs register
+  (`osd.1/2`), phase3 flips the `rbd` pool to `size 3 / min_size 2` and
+  restores the host CRUSH rule. No pool rebuild, no data migration.
+- **No redundancy until then.** The `rbd` pool is size 1 — a lost OSD is
+  data loss.
 
 ---
 
@@ -1154,7 +1193,6 @@ Items tracked in `/root/desired.txt` that are not yet implemented:
 - Distributed firewall via OVN ACLs (native, per-project)
 - Automated single-file restore from remote ZFS snapshots
 - ACME/Let's Encrypt for Incus UI (needs DNS-01 capable DNS server)
-- Ceph multi-node expansion (currently single-node only)
 
 ---
 
@@ -1224,8 +1262,8 @@ sudo systemctl list-timers | grep -E 'rbd|zfs|incus-dns'
 | `ovn-nb-db` / `ovn-sb-db` | OVN DBs (central nodes) |
 | `ovn-northd` / `ovn-controller` | OVN central controller / local chassis agent |
 | `ceph-zfs-prep` | Creates `zroot/ceph-osd0` zvol if missing |
-| `ceph-bootstrap-phase1/2`, `ceph-bootstrap-pool` | One-time Ceph bootstrap (sentinel files) |
-| `ceph-mon-a` / `ceph-mgr-a` / `ceph-osd-0` | Ceph daemons |
+| `ceph-bootstrap-phase1/2`, `ceph-bootstrap-pool` | Ceph bootstrap/join (phase1/2, sentinel-gated) + topology tuning (phase3, every boot) |
+| `ceph-mon-<id>` / `ceph-mgr-<id>` / `ceph-osd-<id>` | Ceph daemons (a/0 on z3-nix01, b/1 on node2, c/2 on node3) |
 | `rbd-backup.service` / `.timer` | Nightly RBD → S3 backups (02:00) |
 | `zfs-snapshot-{frequent,hourly,daily,weekly,monthly}.timer` | ZFS auto-snapshots |
 | `systemd-networkd` | Host network backend |
