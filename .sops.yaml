@@ -10,7 +10,7 @@
 keys:
   - &z3-nix01_age age19fxu6v8aj3emj0dnyhama3qtc0g2a2rmngf77at8gyp7v7afa5fszwjcn3
   # TODO: uncomment as each node comes online (fill in its age pubkey):
-  # - &node2_age age1...
+  - &z3-nix02_age age1gt8g7nqffr8mmc8actvjafcxe9l9uaht7z4ytefekr07wgtfap3s7das3e
   # - &node3_age age1...
 
 creation_rules:
@@ -18,5 +18,5 @@ creation_rules:
     key_groups:
       - age:
           - *z3-nix01_age
-          # - *node2_age
+          - *z3-nix02_age
           # - *node3_age
