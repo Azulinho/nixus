@@ -144,7 +144,7 @@ let
 
     # Link the zvol and init bluestore (once).
     echo bluestore > "$OSD_DIR/type"
-    ln -sf /dev/zvol/zroot/ceph-osd0 "$OSD_DIR/block"
+    ln -sf /dev/zvol/zroot/ceph-osd${osdId} "$OSD_DIR/block"
     if [ ! -f "$OSD_DIR/fsid" ]; then
       ${cephBin}/ceph-osd -i "$OSD_ID" --mkfs --osd-uuid "$OSD_UUID"
     fi
@@ -152,7 +152,10 @@ let
 
     # Explicitly start mgr and osd — systemd may have already evaluated their
     # ConditionPathExists and skipped them in this transaction.
-    systemctl start ceph-mgr-$MGR_ID.service ceph-osd-$OSD_ID.service
+    # --no-block avoids a deadlock: phase2 has Before=mgr/osd, so a blocking
+    # systemctl start would wait for those units which cannot start until
+    # phase2 itself finishes.
+    systemctl --no-block start ceph-mgr-$MGR_ID.service ceph-osd-$OSD_ID.service
 
     touch "$SENTINEL"
   '';
@@ -237,9 +240,9 @@ in
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = pkgs.writeShellScript "ceph-zfs-prep" ''
-        ${pkgs.zfs}/bin/zfs list zroot/ceph-osd0 >/dev/null 2>&1 || \
+        ${pkgs.zfs}/bin/zfs list zroot/ceph-osd${osdId} >/dev/null 2>&1 || \
           ${pkgs.zfs}/bin/zfs create -V 20G -o compression=off \
-            -o primarycache=none -o secondarycache=none zroot/ceph-osd0
+            -o primarycache=none -o secondarycache=none zroot/ceph-osd${osdId}
       '';
     };
   };

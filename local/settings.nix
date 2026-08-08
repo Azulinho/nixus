@@ -27,8 +27,8 @@
       timeZone = "Europe/London";
     };
 
-    node2 = {
-      hostId = "00000000";          # TODO: generate a unique hostid (e.g. `genhostid`)
+    z3-nix02 = {
+      hostId = "fbc34aa8";
       localAddress = "172.16.3.5";
       nodeIndex = 1;
       uplinkInterface = "ens18";

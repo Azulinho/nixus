@@ -24,7 +24,7 @@ HOSTNAME := $(strip $(shell cat $(ROOT)/hostname 2>/dev/null || echo unknown))
 .PHONY: help rebuild rebuild-trace hardware whoami \
 	sops-edit sops-updatekeys sops-init secrets-verify \
 	incus-list incus-storage incus-profiles incus-cluster \
-	ceph-status ceph-pools rbd-list rbd-usage zpool-status zfs-snapshots \
+	ceph-status ceph-pools ceph-wipe rbd-list rbd-usage zpool-status zfs-snapshots \
 	firewall ovn-status ovn-active ovn-nb ovn-sb ovs-show \
 	backup-run backup-log backup-status dns-refresh timers \
 	status
@@ -98,6 +98,24 @@ zpool-status: ## ZFS pool health
 
 zfs-snapshots: ## List ZFS snapshots
 	zfs list -t snapshot
+
+# ---------------------------------------------------------------- ceph-wipe
+# Destroys LOCAL Ceph state so a node can be re-bootstrapped from scratch.
+# Only touches this host's daemons; cluster data on other nodes is unaffected.
+ceph-wipe: ## Wipe local Ceph state (sentinels, mon/mgr/osd dirs, zvols)
+	@echo "Stopping Ceph services..."
+	sudo systemctl stop ceph.target || true
+	sudo systemctl stop ceph-mon.target ceph-mgr.target ceph-osd.target || true
+	@echo "Removing bootstrap sentinels..."
+	sudo rm -f /var/lib/ceph/.phase1-done /var/lib/ceph/.phase2-done /var/lib/ceph/.phase3-done
+	@echo "Removing local daemon directories..."
+	sudo rm -rf /var/lib/ceph/mon /var/lib/ceph/mgr /var/lib/ceph/osd
+	@echo "Destroying Ceph OSD zvols..."
+	@for vol in $$(zfs list -H -o name -t volume | grep '^zroot/ceph-osd'); do \
+		echo "  destroying $$vol"; \
+		sudo zfs destroy "$$vol" 2>/dev/null || true; \
+	done
+	@echo "Ceph wipe complete. Run 'make rebuild' to re-bootstrap."
 
 # ---------------------------------------------------------------- network
 # README §5, §12.4, §15.4
