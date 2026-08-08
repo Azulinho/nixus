@@ -283,19 +283,34 @@ sudo cat /run/secrets/rbdBackupS3Env
 
 **Adding a new host** — the file is encrypted to *all* hosts at once (one
 committed `secrets.yaml`, no per-host copies). The key holders are listed in
-`.sops.yaml`:
+`.sops.yaml`; the new host needs its age key in place **before first boot**:
 
 ```bash
-# 1. On the new host, get its age public key:
-age-keygen -y /var/lib/sops/age.key
+# 1. During install, on the LIVE CD, generate the age key on the target disk
+#    (the CD's own filesystem is tmpfs — anything not written to the target
+#    is lost at reboot). /var/lib/sops/age.key is the path sops-nix reads
+#    (sops.age.keyFile in configuration.nix):
+nix-shell -p age --run 'age-keygen -o /mnt/var/lib/sops/age.key'
+age-keygen -y /mnt/var/lib/sops/age.key        # note the age1… public key
 
-# 2. Add it to .sops.yaml (under `keys:` and in the `creation_rules` key group), then:
-sops updatekeys secrets/secrets.yaml
+# 2. On an EXISTING node that holds the repo — not the CD — add the public
+#    key to .sops.yaml (under `keys:` and in the `creation_rules` key
+#    group), then re-encrypt for every listed holder:
+SOPS_AGE_KEY_FILE=/var/lib/sops/age.key sops updatekeys secrets/secrets.yaml
+git add .sops.yaml secrets/secrets.yaml
+git commit -m "sops: add <host> age key"
+
+# 3. Sync the re-encrypted secrets.yaml into the target repo BEFORE first
+#    boot (git pull or rsync from the CD), so the first boot decrypts cleanly.
 ```
 
 `sops updatekeys` re-encrypts the file for every listed key — existing hosts
 keep working, the new host can decrypt the same file with its own private key.
 
+> **Why not run `sops updatekeys` on the live CD?** It must *decrypt* the file
+> first, which requires an existing host's private key. Running it on an
+> existing node keeps every private key on its own host.
+>
 > **Backup-critical:** `/var/lib/sops/age.key` is **not in git** and must be
 > preserved across reinstalls. Losing it = losing access to the secrets file.
 
@@ -364,7 +379,8 @@ sudo nixos-rebuild switch
 ```
 
 When node2/node3 come online: add their age keys to `.sops.yaml`, run
-`sops updatekeys secrets/secrets.yaml`, then deploy the same repo there.
+`sops updatekeys secrets/secrets.yaml`, then deploy the same repo there
+(full new-host procedure, incl. age-key creation: §3.2 and §9.1).
 Their phase1 bootstrap detects the live cluster and **joins** it (fetches
 the monmap, adds itself, mkfs with the shared mon keyring) instead of
 creating a new one.
@@ -783,23 +799,29 @@ mount/`qemu-nbd` it locally.
 | node3 (172.16.3.6) | `/etc/nixos/hostname` → `node3` (entry: `localAddress = "172.16.3.6"`, `nodeIndex = 2`) |
 | Compute 4..N | add a `hosts.<name>` entry in `local/settings.nix`, set `role = "compute"` in `configuration.nix` |
 
-Full procedure for a new node:
+Full procedure for a new node (node2 below; the sops step is detailed in §3.2):
 
 ```bash
-# 1. On the new host: clone this repo to /etc/nixos, then
-echo nodeX > /etc/nixos/hostname
+# 1. On the live CD: clone this repo to /mnt/etc/nixos, then
+echo node2 > /mnt/etc/nixos/hostname
 
 # 2. Generate the hardware scan and commit it as local/<hostname>-hardware-configuration.nix
-nixos-generate-config --dir /etc/nixos/local
-mv /etc/nixos/local/hardware-configuration.nix /etc/nixos/local/nodeX-hardware-configuration.nix
+nixos-generate-config --dir /mnt/etc/nixos/local
+mv /mnt/etc/nixos/local/hardware-configuration.nix /mnt/etc/nixos/local/node2-hardware-configuration.nix
 
-# 3. Make sure local/settings.nix has a hosts.nodeX entry (copy an existing node)
-# 4. Add the new host's age public key to .sops.yaml and re-encrypt secrets
-age-keygen -y /var/lib/sops/age.key
-sops updatekeys secrets/secrets.yaml
+# 3. Make sure local/settings.nix has a hosts.node2 entry (copy an existing entry for others)
+# 4. sops — create the age key on the target and register it (§3.2):
+nix-shell -p age --run 'age-keygen -o /mnt/var/lib/sops/age.key'
+#    then, on an existing node: .sops.yaml + `sops updatekeys`, and sync the
+#    re-encrypted secrets.yaml back into /mnt/etc/nixos BEFORE first boot.
+#    (Also run `genhostid` and set node2's real hostId in settings.nix — the
+#    entry ships with a placeholder "00000000".)
 
-# 5. Build
+# 5. Boot, then:
 sudo nixos-rebuild switch
+#    phase1 starts after sops-nix.service (shared keyrings live in /run/secrets)
+#    and auto-JOINS the Ceph cluster; phase3 converges replication once the
+#    third OSD is in.
 ```
 
 All nodes use the same `centralNodes` list. Compute nodes connect their
@@ -1155,6 +1177,10 @@ A minimal operating rhythm for the cluster (adjust cadence to taste):
   `systemctl restart ceph-bootstrap-phaseN.service` after fixing the cause).
   phase3 re-runs **every boot** to converge CRUSH + replication with the
   current topology — that's how growth needs no manual steps.
+- **Fresh-node join:** `ceph-bootstrap-phase1` starts after
+  `sops-nix.service` (the shared keyrings are installed from `/run/secrets`).
+  If it stays `activating`/retrying, check `journalctl -u sops-nix.service` —
+  a missing or unregistered age key (see §3.2) is the usual cause.
 - **Grow 1 → 3 nodes:** deploy this repo on node2/node3 (same config, own
   `hostname` file). Their mons join (`a b c`), their OSDs register
   (`osd.1/2`), phase3 flips the `rbd` pool to `size 3 / min_size 2` and

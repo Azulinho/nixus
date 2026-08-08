@@ -290,7 +290,7 @@ in
   systemd.services.ceph-bootstrap-phase1 = {
     description = "Bootstrap or join Ceph mon";
     before = [ "ceph-mon-${monId}.service" ];
-    after = [ "network-online.target" "time-sync.target" ];
+    after = [ "network-online.target" "time-sync.target" "sops-nix.service" ];  # shared keyrings come from /run/secrets
     wants = [ "network-online.target" ];
     wantedBy = [ "ceph-mon.target" ];
     serviceConfig = {
